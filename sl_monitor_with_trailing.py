@@ -265,6 +265,7 @@ class EnhancedSLMonitor:
             quantity = abs(position['quantity'])  # Always positive for order quantity
             avg_price = abs(position['average_price'])
             exchange = position['exchange']
+            product_type = position.get('product', 'MIS')  # Get product from position
             
             # Determine transaction type (opposite of position)
             if position['quantity'] > 0:
@@ -291,7 +292,7 @@ class EnhancedSLMonitor:
             else:
                 limit_price = sl_price + 1
             
-            if not self.test_mode:
+            '''if not self.test_mode:
                 order_id = self.kite.place_order(
                     variety=self.kite.VARIETY_REGULAR,
                     exchange=exchange,
@@ -302,8 +303,28 @@ class EnhancedSLMonitor:
                     order_type=self.kite.ORDER_TYPE_SL,
                     trigger_price=sl_price,
                     price=limit_price
-                )
-                
+                )'''
+                # Convert product type to Kite constant
+            if product_type == 'NRML':
+                kite_product = self.kite.PRODUCT_NRML
+            elif product_type == 'MIS':
+                kite_product = self.kite.PRODUCT_MIS
+            else:
+                kite_product = self.kite.PRODUCT_MIS  # Fallback
+
+            logging.info(f"   [PRODUCT] Using {product_type} to match position")
+
+            order_id = self.kite.place_order(
+                variety=self.kite.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                product=kite_product,  # ← NOW MATCHES POSITION!
+                order_type=self.kite.ORDER_TYPE_SL,
+                trigger_price=sl_price,
+    price=limit_price
+)
                 # Record placement time
                 self.sl_placement_time[tradingsymbol] = time.time()
                 
