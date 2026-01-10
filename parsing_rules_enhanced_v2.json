@@ -1,0 +1,186 @@
+{
+  "version": "2.0",
+  "last_updated": "2025-12-29",
+  
+  "ignoreable_patterns": {
+    "description": "Messages to skip completely",
+    
+    "minimum_length": 10,
+    
+    "exact_matches": [
+      "Active",
+      "WAIT",
+      "HOLD",
+      "RUNNING",
+      "WAIT FOR LEVEL",
+      "SL Remove",
+      "Sl Remove Okay",
+      "LEVEL ACTIVE"
+    ],
+    
+    "contains_keywords": [
+      "RUNNING",
+      "HOLD ALL",
+      "LEVEL ACTIVE",
+      "profit screenshot",
+      "Profit booked",
+      "Big Profit Booked",
+      "Share Your Feedback",
+      "Account handling profit",
+      "done check",
+      "Enjoy Profit",
+      "SL Remove",
+      "Sl Remove",
+      "WAIT FOR LEVEL",
+      "Dekha Guruji",
+      "book kr lo",
+      "Risky Small",
+      "UPDATE",
+      "cosmofeed",
+      "XAUUSD",
+      "COMEX",
+      "Watchlist",
+      "WATCHLIST",
+      "watchlist",
+      "Using Claude API for:",
+      "Close 6 pass",
+      "Target Achieved",
+      "First and second Target",
+      "Today No Movement",
+      "CAPITAL DOUBLE",
+      "TRIPLE",
+      "opportunity",
+      "maza na aye",
+      "JOIN OUR ACCOUNT",
+      "HANDLING SERVICE",
+      "Good morning",
+      "profitable day",
+      "Update Fast",
+      "Enjoy",
+      "Fire",
+      "BOOK PROFIT"
+    ],
+    
+    "regex_patterns": [
+      "^\\d{1,3}\\+\\+",
+      "Enjoy \\d+ point",
+      "Back To Back Level Fire",
+      "\\d+ TO \\d+\\+\\+",
+      "Account handling profit.*done.*check"
+    ]
+  },
+  
+  "symbol_mapping": {
+    "GAS": "NATURALGAS",
+    "CRUDE": "CRUDEOILM",
+    "CRUDEOIL": "CRUDEOILM",
+    "NG": "NATURALGAS",
+    "GOLD": "GOLDM"
+  },
+  
+  "expiry_dates": {
+    "GOLD": "2026-01-27",
+    "GOLDM": "2026-01-27",
+    "SILVER": "2026-01-27",
+    "SILVERM": "2026-01-27",
+    "NATURALGAS": "2025-12-23",
+    "CRUDEOIL": "2025-12-19",
+    "CRUDEOILM": "2025-12-19",
+    "COPPER": "2025-12-27",
+    "ZINC": "2025-12-27",
+    "LEAD": "2025-12-27",
+    "NICKEL": "2025-12-27",
+    "ALUMINUM": "2025-12-27"
+  },
+  
+  "channel_specific_rules": {
+    "-1003282204738": {
+      "name": "PREMIUM_GROUP",
+      "never_has_expiry": true,
+      "never_has_symbol": true,
+      "auto_detect_symbol_by_strike": {
+        "enabled": true,
+        "ranges": {
+          "NIFTY": {"min": 25000, "max": 27000},
+          "BANKNIFTY": {"min": 56000, "max": 63000},
+          "SENSEX": {"min": 81000, "max": 87000},
+          "FINNIFTY": {"min": 24000, "max": 26000},
+          "MIDCPNIFTY": {"min": 14000, "max": 16000},
+          "BANKEX": {"min": 60000, "max": 66000}
+        }
+      }
+    },
+    
+    "-1003089362819": {
+      "name": "GrowX Official VIP",
+      "sometimes_missing_symbol": true,
+      "auto_detect_symbol_by_strike": {
+        "enabled": true,
+        "ranges": {
+          "NIFTY": {"min": 25000, "max": 27000},
+          "BANKNIFTY": {"min": 56000, "max": 63000},
+          "SENSEX": {"min": 81000, "max": 87000},
+          "FINNIFTY": {"min": 24000, "max": 26000},
+          "MIDCPNIFTY": {"min": 14000, "max": 16000},
+          "BANKEX": {"min": 60000, "max": 66000}
+        }
+      }
+    },
+    
+    "-1002770917134": {
+      "name": "MCX PREMIUM",
+      "commodity_keywords": ["COMMODITY MCX TRADE", "BTST COMMODITY MCX TRAD"],
+      "force_commodity": true
+    },
+    
+    "-1002380215256": {
+      "name": "PREMIUM_GROUP_SENSEX",
+      "auto_detect_symbol_by_strike": {
+        "enabled": true,
+        "ranges": {
+          "NIFTY": {"min": 25000, "max": 27000},
+          "BANKNIFTY": {"min": 56000, "max": 63000},
+          "SENSEX": {"min": 81000, "max": 87000},
+          "FINNIFTY": {"min": 24000, "max": 26000},
+          "MIDCPNIFTY": {"min": 14000, "max": 16000},
+          "BANKEX": {"min": 60000, "max": 66000}
+        }
+      }
+    }
+  },
+  
+  "commodity_detection": {
+    "keywords": [
+      "COMMODITY MCX TRADE",
+      "BTST COMMODITY MCX TRAD",
+      "MCX TRADE"
+    ],
+    "symbols": [
+      "GOLD",
+      "GOLDM",
+      "SILVER",
+      "SILVERM",
+      "NATURALGAS",
+      "CRUDEOIL",
+      "CRUDEOILM",
+      "COPPER",
+      "ZINC",
+      "LEAD",
+      "NICKEL",
+      "ALUMINUM",
+      "AMBER"
+    ]
+  },
+  
+  "index_symbols": {
+    "description": "Explicitly recognized index symbols",
+    "symbols": [
+      "NIFTY",
+      "BANKNIFTY",
+      "FINNIFTY",
+      "MIDCPNIFTY",
+      "SENSEX",
+      "BANKEX"
+    ]
+  }
+}
