@@ -205,8 +205,11 @@ def test_trained_agent():
     try:
         with open('claude_api_key.txt', 'r') as f:
             api_key = f.read().strip()
-    except:
+    except FileNotFoundError:
         print("Error: claude_api_key.txt not found")
+        sys.exit(1)
+    except (IOError, OSError) as e:
+        print(f"Error reading claude_api_key.txt: {e}")
         sys.exit(1)
     
     # Initialize

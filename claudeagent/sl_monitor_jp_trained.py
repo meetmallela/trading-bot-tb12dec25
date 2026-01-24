@@ -275,8 +275,11 @@ class SLMonitorJPTrained:
                     ltp_data = self.kite.ltp([f"{position['exchange']}:{tradingsymbol}"])
                     ltp_key = f"{position['exchange']}:{tradingsymbol}"
                     current_ltp = ltp_data[ltp_key]['last_price']
-                except:
-                    logging.warning(f"[WARN] Could not get LTP for {tradingsymbol}")
+                except (KeyError, TypeError) as e:
+                    logging.warning(f"[WARN] Could not get LTP for {tradingsymbol}: {e}")
+                    continue
+                except Exception as e:
+                    logging.warning(f"[WARN] LTP fetch error for {tradingsymbol}: {type(e).__name__}: {e}")
                     continue
                 
                 # Calculate P&L

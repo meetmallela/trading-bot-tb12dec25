@@ -20,6 +20,32 @@ from instrument_finder_FAST import FastInstrumentFinder
 class SignalParserWithFutures:
     """Parser with OPTIONS + FUTURES support"""
     
+    # ========================================
+    # SYMBOL-SPECIFIC EXPIRY DAYS
+    # ========================================
+    # Format: {symbol: weekday} where 0=Monday, 1=Tuesday, 2=Wednesday, 3=Thursday, 4=Friday
+    EXPIRY_DAY_MAP = {
+        'SENSEX': 2,      # Wednesday (BSE index)
+        'BANKEX': 2,      # Wednesday (BSE index)
+        'NIFTY': 3,       # Thursday (NSE index)
+        'BANKNIFTY': 2,   # Wednesday (NSE index)
+        'FINNIFTY': 1,    # Tuesday (NSE index)
+        'MIDCPNIFTY': 0,  # Monday (NSE index)
+    }
+    
+    # ========================================
+    # SYMBOL-SPECIFIC LOT SIZES (FALLBACK)
+    # ========================================
+    # These are used as fallback if CSV lookup fails
+    DEFAULT_LOT_SIZES = {
+        'SENSEX': 20,
+        'BANKEX': 15,
+        'NIFTY': 65,
+        'BANKNIFTY': 30,
+        'FINNIFTY': 25,
+        'MIDCPNIFTY': 50,
+    }
+    
     def __init__(self, claude_api_key, rules_file='parsing_rules_enhanced_v2.json'):
         self.logger = logging.getLogger('PARSER')
         self.claude_api_key = claude_api_key
@@ -30,9 +56,12 @@ class SignalParserWithFutures:
         try:
             with open(rules_file, 'r') as f:
                 self.rules = json.load(f)
-        except:
+        except FileNotFoundError:
             self.rules = {}
-            self.logger.warning("Rules file not found, using defaults")
+            self.logger.warning(f"Rules file '{rules_file}' not found, using defaults")
+        except (json.JSONDecodeError, IOError) as e:
+            self.rules = {}
+            self.logger.warning(f"Could not load rules file: {e}, using defaults")
         
         # Futures lot sizes (MCX)
         self.futures_lot_sizes = {
@@ -257,6 +286,57 @@ class SignalParserWithFutures:
         else:
             return all(result.get(f) for f in ['symbol', 'strike', 'option_type'])
     
+    def _calculate_nearest_expiry(self, symbol):
+        """
+        Calculate nearest expiry based on symbol-specific expiry day
+        
+        Args:
+            symbol: Symbol name (SENSEX, NIFTY, etc.)
+        
+        Returns:
+            str: Expiry date in 'YYYY-MM-DD' format
+        """
+        from datetime import datetime, timedelta
+        
+        today = datetime.now().date()
+        
+        # Get target weekday for this symbol (default to Thursday if not found)
+        target_weekday = self.EXPIRY_DAY_MAP.get(symbol, 3)  # Default Thursday
+        
+        # Calculate days ahead to target weekday
+        current_weekday = today.weekday()
+        days_ahead = target_weekday - current_weekday
+        
+        # If target day is today or has passed this week, get next week's
+        if days_ahead <= 0:
+            days_ahead += 7
+        
+        expiry_date = today + timedelta(days=days_ahead)
+        
+        self.logger.info(f"[EXPIRY] {symbol} expires on weekday {target_weekday}, calculated: {expiry_date.strftime('%Y-%m-%d')}")
+        
+        return expiry_date.strftime('%Y-%m-%d')
+    
+    def _get_default_lot_size(self, symbol):
+        """
+        Get default lot size for symbol (fallback if CSV lookup fails)
+        
+        Args:
+            symbol: Symbol name (SENSEX, NIFTY, etc.)
+        
+        Returns:
+            int: Lot size
+        """
+        # Check hardcoded lot sizes first
+        for key, lot_size in self.DEFAULT_LOT_SIZES.items():
+            if key in symbol.upper():
+                self.logger.info(f"[LOT SIZE] Using fallback lot size {lot_size} for {symbol}")
+                return lot_size
+        
+        # Last resort default
+        self.logger.warning(f"[LOT SIZE] Using default lot size 10 for unknown symbol {symbol}")
+        return 10
+    
     def _enrich_futures_data(self, result):
         """Enrich futures with expiry date and quantity"""
         # Convert month code to expiry date
@@ -360,36 +440,39 @@ class SignalParserWithFutures:
             return result
         
         # ========================================
-        # SENSEX - Calculate Friday expiry manually
+        # INDEX OPTIONS (SENSEX, NIFTY, BANKNIFTY, etc.) - Use symbol-specific expiry
         # ========================================
-        if result['symbol'] == 'SENSEX':
-            from datetime import datetime, timedelta
-            import calendar
+        # Check if this is a known index symbol
+        is_known_index = any(result['symbol'].upper().startswith(idx) for idx in self.EXPIRY_DAY_MAP.keys())
+        
+        if is_known_index:
+            from datetime import datetime
             
-            today = datetime.now()
-            
-            # SENSEX expiry: Friday of current week
-            days_until_friday = (4 - today.weekday()) % 7  # Friday = 4
-            if days_until_friday == 0:
-                # Today is Friday, use next Friday
-                days_until_friday = 7
-            
-            expiry_date = today + timedelta(days=days_until_friday)
-            result['expiry_date'] = expiry_date.strftime('%Y-%m-%d')
-            result['expiry_auto_added'] = True
+            # Calculate expiry date using symbol-specific day
+            if not result.get('expiry_date'):
+                result['expiry_date'] = self._calculate_nearest_expiry(result['symbol'])
+                result['expiry_auto_added'] = True
             
             # Build tradingsymbol: SENSEX26JAN84900PE
-            year_code = expiry_date.strftime('%y')
-            month_code = expiry_date.strftime('%b').upper()
-            tradingsymbol = f"SENSEX{year_code}{month_code}{result['strike']}{result['option_type']}"
+            expiry_dt = datetime.strptime(result['expiry_date'], '%Y-%m-%d')
+            year_code = expiry_dt.strftime('%y')
+            month_code = expiry_dt.strftime('%b').upper()
+            tradingsymbol = f"{result['symbol']}{year_code}{month_code}{result['strike']}{result['option_type']}"
             result['tradingsymbol'] = tradingsymbol
             
-            # SENSEX details
-            result['exchange'] = 'BFO'
-            result['quantity'] = 10  # SENSEX lot size
-            result['quantity_auto_added'] = True
+            # Determine exchange
+            if result['symbol'] in ['SENSEX', 'BANKEX']:
+                result['exchange'] = 'BFO'  # BSE
+            else:
+                result['exchange'] = 'NFO'  # NSE
             
-            self.logger.info(f"[SENSEX ENRICH] Built: {tradingsymbol} | Expiry: {result['expiry_date']} (Friday) | Lot: 10")
+            # Get lot size (use hardcoded fallback)
+            if not result.get('quantity'):
+                result['quantity'] = self._get_default_lot_size(result['symbol'])
+                result['quantity_auto_added'] = True
+            
+            self.logger.info(f"[INDEX ENRICH] {result['symbol']}: {tradingsymbol} | " +
+                           f"Expiry: {result['expiry_date']} | Lot: {result['quantity']}")
             
             return result
         
@@ -414,13 +497,31 @@ class SignalParserWithFutures:
             result['exchange'] = instrument['exchange']
             
             if not result.get('quantity'):
-                result['quantity'] = self.instrument_finder.get_default_quantity(result['symbol'])
+                # Try to get from instrument first
+                try:
+                    result['quantity'] = self.instrument_finder.get_default_quantity(result['symbol'])
+                except (KeyError, AttributeError, ValueError) as e:
+                    # Fallback to hardcoded lot sizes
+                    self.logger.debug(f"Using fallback lot size for {result['symbol']}: {e}")
+                    result['quantity'] = self._get_default_lot_size(result['symbol'])
                 result['quantity_auto_added'] = True
             
-            self.logger.info(f"[ENRICH] Added: tradingsymbol={instrument['symbol']}, " +
+            self.logger.info(f"[ENRICH] Added: tradingsymbol={instrument.get('tradingsymbol', instrument.get('symbol'))}, " +
                            f"expiry={instrument['expiry_date']}, qty={result.get('quantity')}")
         else:
+            # Instrument not found in CSV - use fallbacks
             self.logger.warning(f"[WARN] Instrument not found: {result['symbol']} {result['strike']} {result['option_type']}")
+            
+            # Add fallback lot size if missing
+            if not result.get('quantity'):
+                result['quantity'] = self._get_default_lot_size(result['symbol'])
+                result['quantity_auto_added'] = True
+            
+            # Add fallback expiry if missing
+            if not result.get('expiry_date'):
+                result['expiry_date'] = self._calculate_nearest_expiry(result['symbol'])
+                result['expiry_auto_added'] = True
+                self.logger.info(f"[FALLBACK] Using calculated expiry: {result['expiry_date']}")
         
         return result
     

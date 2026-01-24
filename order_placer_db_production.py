@@ -518,8 +518,8 @@ class OrderPlacerProduction:
                             check_tradingsymbol = f"{symbol}{exp_str}{strike}{option_type}"
                         else:
                             check_tradingsymbol = f"{symbol}FUT"
-                    except:
-                        pass
+                    except (KeyError, ValueError, TypeError) as e:
+                        logging.debug(f"Could not build tradingsymbol for duplicate check: {e}")
                 
                 if check_tradingsymbol:
                     # CHECK 1: Is instrument blacklisted due to SL exit today?

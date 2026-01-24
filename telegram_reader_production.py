@@ -114,8 +114,11 @@ logging.info(f"[LOG] Writing to: {log_filename}")
 try:
     with open('claude_api_key.txt', 'r') as f:
         claude_api_key = f.read().strip()
-except:
+except FileNotFoundError:
     logging.warning("[WARNING] claude_api_key.txt not found - fallback to Claude API disabled")
+    claude_api_key = None
+except (IOError, OSError) as e:
+    logging.warning(f"[WARNING] Could not read claude_api_key.txt: {e}")
     claude_api_key = None
 
 # Initialize Telegram client
@@ -162,12 +165,12 @@ def get_expiry_dates_from_csv():
         try:
             df = pd.read_parquet('valid_instruments.parquet')
             logging.info("[EXPIRY] Loaded valid_instruments.parquet")
-        except:
+        except (FileNotFoundError, IOError, Exception) as parquet_err:
             try:
                 df = pd.read_csv('valid_instruments.csv')
                 logging.info("[EXPIRY] Loaded valid_instruments.csv")
-            except:
-                logging.warning("[EXPIRY] Could not load instruments file")
+            except (FileNotFoundError, IOError, pd.errors.EmptyDataError) as csv_err:
+                logging.warning(f"[EXPIRY] Could not load instruments file: {csv_err}")
                 return None
         
         # Get current month
@@ -391,8 +394,8 @@ async def main():
             try:
                 await client.get_messages(entity, limit=1)
                 logging.info(f"[OK] Monitoring: {entity.title} (synced)")
-            except:
-                logging.info(f"[OK] Monitoring: {entity.title}")
+            except Exception as sync_err:
+                logging.info(f"[OK] Monitoring: {entity.title} (sync skipped: {type(sync_err).__name__})")
                 
         except Exception as e:
             logging.error(f"[ERROR] Failed to get channel {channel_id}: {e}")
