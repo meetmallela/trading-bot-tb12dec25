@@ -1,0 +1,28 @@
+# Sensitive credentials
+kite_config.json
+telegram_config.json
+claude_api_key.txt
+claudeagent/telegram_config.json
+claudeagent/claude_api_key.txt
+*.env
+
+# Logs
+*.log
+
+# Database
+*.db
+trading.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Large data files
+valid_instruments.csv
+*.parquet
+*.pkl
+
+# System files
+.DS_Store
+Thumbs.db

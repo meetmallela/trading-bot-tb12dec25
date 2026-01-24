@@ -1,6 +1,6 @@
 """
-telegram_reader_production.py - WITH FUTURES SUPPORT
-Handles both OPTIONS and FUTURES signals
+telegram_reader_production.py - ENHANCED VERSION
+WITH FUTURES SUPPORT + EXPIRY DATE DISPLAY + TIMESTAMPED LOGS
 """
 
 import asyncio
@@ -18,10 +18,46 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-# Telegram API credentials
-TELEGRAM_API_ID = 25677420
-TELEGRAM_API_HASH = "3fe3d6d76fdffd005104a5df5db5ba6f"
-TELEGRAM_PHONE = "+919833459174"
+# Generate timestamped log filename
+log_start_time = datetime.now()
+log_filename = log_start_time.strftime('telegram_reader_%d%b%Y_%H_%M_%S.log')
+
+# Load Telegram API credentials from config file
+import os
+
+def load_telegram_config():
+    """Load Telegram credentials from config file or environment variables"""
+    # First try environment variables (highest priority)
+    api_id = os.environ.get('TELEGRAM_API_ID')
+    api_hash = os.environ.get('TELEGRAM_API_HASH')
+    phone = os.environ.get('TELEGRAM_PHONE')
+
+    if api_id and api_hash and phone:
+        return int(api_id), api_hash, phone
+
+    # Fall back to config file
+    config_paths = ['telegram_config.json', 'claudeagent/telegram_config.json']
+    for config_path in config_paths:
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
+                    return (
+                        config['api_id'],
+                        config['api_hash'],
+                        config.get('phone') or config.get('phone_number')
+                    )
+            except (json.JSONDecodeError, KeyError) as e:
+                print(f"Error reading {config_path}: {e}")
+                continue
+
+    raise RuntimeError(
+        "Telegram credentials not found. Please either:\n"
+        "1. Set environment variables: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE\n"
+        "2. Create telegram_config.json with: api_id, api_hash, phone_number"
+    )
+
+TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE = load_telegram_config()
 
 # Channels to monitor (INTEGER format!)
 MONITORED_CHANNELS = [
@@ -58,18 +94,21 @@ except ImportError:
         print("ERROR: Parser not found!")
         exit(1)
 
-# Configure logging
+# Configure logging with timestamped filename
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - TELEGRAM - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('telegram_reader.log', encoding='utf-8'),
+        logging.FileHandler(log_filename, encoding='utf-8'),
         logging.StreamHandler(
             io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
             if sys.platform == 'win32' else sys.stdout
         )
     ]
 )
+
+# Log the filename being used
+logging.info(f"[LOG] Writing to: {log_filename}")
 
 # Load Claude API key
 try:
@@ -120,6 +159,112 @@ stats = {
     'options_signals': 0,
     'futures_signals': 0
 }
+
+
+def get_expiry_dates_from_csv():
+    """
+    Extract and display expiry dates for major indices from CSV
+    Returns dict of {symbol: [expiry_dates]}
+    """
+    try:
+        import pandas as pd
+        from datetime import datetime
+        
+        # Try to load CSV or Parquet
+        try:
+            df = pd.read_parquet('valid_instruments.parquet')
+            logging.info("[EXPIRY] Loaded valid_instruments.parquet")
+        except:
+            try:
+                df = pd.read_csv('valid_instruments.csv')
+                logging.info("[EXPIRY] Loaded valid_instruments.csv")
+            except:
+                logging.warning("[EXPIRY] Could not load instruments file")
+                return None
+        
+        # Get current month
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        
+        # Symbols to check
+        symbols_to_check = ['NIFTY', 'SENSEX', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
+        
+        expiry_info = {}
+        
+        for symbol in symbols_to_check:
+            # Find instruments for this symbol
+            symbol_instruments = df[df['symbol'].str.contains(symbol, case=False, na=False)].copy()
+            
+            if len(symbol_instruments) > 0:
+                # Convert expiry_date to datetime
+                symbol_instruments['expiry_dt'] = pd.to_datetime(symbol_instruments['expiry_date'])
+                
+                # Filter for current month
+                current_month_expiries = symbol_instruments[
+                    (symbol_instruments['expiry_dt'].dt.month == current_month) &
+                    (symbol_instruments['expiry_dt'].dt.year == current_year)
+                ]
+                
+                # Get unique expiry dates
+                unique_expiries = sorted(current_month_expiries['expiry_dt'].unique())
+                
+                if len(unique_expiries) > 0:
+                    # Convert to string dates
+                    expiry_dates = [dt.strftime('%Y-%m-%d (%A)') for dt in unique_expiries]
+                    expiry_info[symbol] = expiry_dates
+        
+        return expiry_info
+        
+    except Exception as e:
+        logging.error(f"[EXPIRY] Error extracting expiry dates: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def display_expiry_info():
+    """Display expiry dates for major indices"""
+    logging.info("")
+    logging.info("="*80)
+    logging.info("📅 CURRENT MONTH EXPIRY DATES")
+    logging.info("="*80)
+    
+    expiry_info = get_expiry_dates_from_csv()
+    
+    if expiry_info:
+        current_month_name = datetime.now().strftime('%B %Y')
+        logging.info(f"Month: {current_month_name}")
+        logging.info("")
+        
+        # Display NIFTY and SENSEX first
+        for symbol in ['NIFTY', 'SENSEX']:
+            if symbol in expiry_info:
+                logging.info(f"{symbol}:")
+                for expiry in expiry_info[symbol]:
+                    logging.info(f"  ✓ {expiry}")
+                logging.info("")
+        
+        # Display BANKNIFTY, FINNIFTY, MIDCPNIFTY
+        for symbol in ['BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
+            if symbol in expiry_info:
+                logging.info(f"{symbol}:")
+                for expiry in expiry_info[symbol]:
+                    logging.info(f"  ✓ {expiry}")
+                logging.info("")
+        
+        # Display any other symbols found
+        other_symbols = [s for s in expiry_info.keys() 
+                        if s not in ['NIFTY', 'SENSEX', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']]
+        for symbol in other_symbols:
+            logging.info(f"{symbol}:")
+            for expiry in expiry_info[symbol]:
+                logging.info(f"  ✓ {expiry}")
+            logging.info("")
+    else:
+        logging.warning("Could not load expiry information from CSV/Parquet")
+    
+    logging.info("="*80)
+    logging.info("")
 
 
 def insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data):
@@ -251,6 +396,9 @@ async def main():
     me = await client.get_me()
     logging.info(f"[OK] Connected to Telegram as {me.phone}")
     
+    # Display expiry information BEFORE starting monitoring
+    display_expiry_info()
+    
     # Get channel entities and FORCE CATCH-UP for each
     channel_entities = []
     for channel_id in MONITORED_CHANNELS:
@@ -272,6 +420,7 @@ async def main():
     logging.info("="*80)
     logging.info(f"[START] Monitoring {len(channel_entities)} channels")
     logging.info(f"[MODE] {PARSER_TYPE} - {'OPTIONS + FUTURES' if FUTURES_SUPPORT else 'OPTIONS only'}")
+    logging.info(f"[LOG] Output: {log_filename}")
     logging.info("Press Ctrl+C to stop")
     logging.info("="*80)
     
