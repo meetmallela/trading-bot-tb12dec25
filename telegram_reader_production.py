@@ -1,17 +1,30 @@
 """
 telegram_reader_production.py - ENHANCED VERSION
 WITH FUTURES SUPPORT + EXPIRY DATE DISPLAY + TIMESTAMPED LOGS
+
+Features:
+- Graceful shutdown on SIGTERM/SIGINT
+- Rate limiting to prevent API bans
+- Explicit timezone handling (IST)
 """
 
 import asyncio
 import json
 import logging
 import sqlite3
+import signal
 from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.tl.functions.channels import GetParticipantRequest
 import sys
 import io
+
+try:
+    import pytz
+    IST = pytz.timezone('Asia/Kolkata')
+except ImportError:
+    IST = None
+    logging.warning("[WARN] pytz not installed - using local timezone")
 
 # Fix Windows console encoding issues
 if sys.platform == 'win32':
@@ -150,6 +163,86 @@ stats = {
     'options_signals': 0,
     'futures_signals': 0
 }
+
+# ========================================
+# RATE LIMITING
+# ========================================
+import time
+from collections import deque
+
+class RateLimiter:
+    """Simple rate limiter to prevent API bans"""
+    def __init__(self, max_calls=30, window_seconds=60):
+        self.max_calls = max_calls
+        self.window_seconds = window_seconds
+        self.calls = deque()
+
+    def acquire(self):
+        """Wait if rate limit exceeded, return True when ready"""
+        now = time.time()
+        # Remove calls outside the window
+        while self.calls and self.calls[0] < now - self.window_seconds:
+            self.calls.popleft()
+
+        if len(self.calls) >= self.max_calls:
+            # Wait until oldest call expires
+            sleep_time = self.calls[0] + self.window_seconds - now
+            if sleep_time > 0:
+                logging.warning(f"[RATE LIMIT] Waiting {sleep_time:.1f}s...")
+                time.sleep(sleep_time)
+
+        self.calls.append(time.time())
+        return True
+
+# Rate limiter: max 30 messages per minute
+rate_limiter = RateLimiter(max_calls=30, window_seconds=60)
+
+# ========================================
+# GRACEFUL SHUTDOWN
+# ========================================
+shutdown_event = asyncio.Event() if hasattr(asyncio, 'Event') else None
+_shutdown_requested = False
+
+def request_shutdown(signum=None, frame=None):
+    """Handle shutdown signals gracefully"""
+    global _shutdown_requested
+    if _shutdown_requested:
+        logging.warning("[SHUTDOWN] Force quit...")
+        sys.exit(1)
+
+    _shutdown_requested = True
+    sig_name = signal.Signals(signum).name if signum else "UNKNOWN"
+    logging.info(f"\n[SHUTDOWN] Received {sig_name}, shutting down gracefully...")
+    print_stats()
+
+    # Try to set asyncio event if available
+    try:
+        if shutdown_event and not shutdown_event.is_set():
+            shutdown_event.set()
+    except Exception:
+        pass
+
+# Register signal handlers
+if sys.platform != 'win32':
+    signal.signal(signal.SIGTERM, request_shutdown)
+signal.signal(signal.SIGINT, request_shutdown)
+
+# ========================================
+# TIMEZONE UTILITIES
+# ========================================
+def get_ist_now():
+    """Get current time in IST timezone"""
+    if IST:
+        return datetime.now(IST)
+    return datetime.now()
+
+def format_ist_timestamp(dt=None):
+    """Format datetime as IST timestamp string"""
+    if dt is None:
+        dt = get_ist_now()
+    if IST and dt.tzinfo is None:
+        dt = IST.localize(dt)
+    return dt.strftime('%Y-%m-%d %H:%M:%S IST')
 
 
 def get_expiry_dates_from_csv():
@@ -295,23 +388,31 @@ def insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data):
 
 
 async def handle_message(event):
-    """Handle incoming Telegram messages"""
+    """Handle incoming Telegram messages with rate limiting"""
+    # Check for shutdown
+    if _shutdown_requested:
+        return
+
     try:
         message_text = event.message.message
         if not message_text:
             return
-        
+
+        # Apply rate limiting
+        rate_limiter.acquire()
+
         channel = await event.get_chat()
         channel_id = str(event.chat_id)
         channel_name = channel.title if hasattr(channel, 'title') else str(channel_id)
         message_id = event.message.id
-        
+
         stats['total_messages'] += 1
-        
-        # Log preview
+
+        # Log preview with IST timestamp
         logging.info("")
         logging.info("="*60)
         logging.info(f"[NEW] Message from: {channel_name} (ID: {channel_id})")
+        logging.info(f"[TIME] {format_ist_timestamp()}")
         preview = message_text[:50].replace('\n', ' ') + '...' if len(message_text) > 50 else message_text
         logging.info(f"[PREVIEW] {preview}")
         logging.info("="*60)
@@ -439,9 +540,17 @@ def print_stats():
 
 
 if __name__ == '__main__':
+    logging.info(f"[START] Telegram Reader starting at {format_ist_timestamp()}")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("\n[STOP] Shutting down...")
-        print_stats()
+        if not _shutdown_requested:
+            logging.info("\n[STOP] Shutting down...")
+            print_stats()
+    except Exception as e:
+        logging.error(f"[FATAL] Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        logging.info(f"[END] Telegram Reader stopped at {format_ist_timestamp()}")
     # Note: No db.close() needed - ThreadSafeDB uses connection-per-operation

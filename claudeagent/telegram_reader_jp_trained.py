@@ -7,6 +7,9 @@ NEW FEATURES:
 - Shows NIFTY/SENSEX/BANKNIFTY expiry dates on startup
 - Timestamped log files (telegram_jp_22JAN2026_14_30_45.log)
 - Validates instruments loaded from CSV
+- Graceful shutdown on SIGTERM/SIGINT
+- Rate limiting to prevent API bans
+- Explicit timezone handling (IST)
 """
 
 import asyncio
@@ -14,11 +17,19 @@ import json
 import sqlite3
 import sys
 import io
+import signal
+import time
 from datetime import datetime
+from collections import deque, defaultdict
 from telethon import TelegramClient, events
 from jp_channel_agent_trained import JPChannelAgentTrained
 import pandas as pd
-from collections import defaultdict
+
+try:
+    import pytz
+    IST = pytz.timezone('Asia/Kolkata')
+except ImportError:
+    IST = None
 
 # Fix Windows encoding
 if sys.platform == 'win32':
@@ -98,6 +109,64 @@ stats = {
     'index_options': 0,
     'stock_options': 0
 }
+
+# ========================================
+# RATE LIMITING
+# ========================================
+class RateLimiter:
+    """Simple rate limiter to prevent API bans"""
+    def __init__(self, max_calls=30, window_seconds=60):
+        self.max_calls = max_calls
+        self.window_seconds = window_seconds
+        self.calls = deque()
+
+    def acquire(self):
+        now = time.time()
+        while self.calls and self.calls[0] < now - self.window_seconds:
+            self.calls.popleft()
+        if len(self.calls) >= self.max_calls:
+            sleep_time = self.calls[0] + self.window_seconds - now
+            if sleep_time > 0:
+                logger.warning(f"[RATE LIMIT] Waiting {sleep_time:.1f}s...")
+                time.sleep(sleep_time)
+        self.calls.append(time.time())
+        return True
+
+rate_limiter = RateLimiter(max_calls=30, window_seconds=60)
+
+# ========================================
+# GRACEFUL SHUTDOWN
+# ========================================
+_shutdown_requested = False
+
+def request_shutdown(signum=None, frame=None):
+    global _shutdown_requested
+    if _shutdown_requested:
+        logger.warning("[SHUTDOWN] Force quit...")
+        sys.exit(1)
+    _shutdown_requested = True
+    sig_name = signal.Signals(signum).name if signum else "UNKNOWN"
+    logger.info(f"\n[SHUTDOWN] Received {sig_name}, shutting down gracefully...")
+    print_stats()
+
+if sys.platform != 'win32':
+    signal.signal(signal.SIGTERM, request_shutdown)
+signal.signal(signal.SIGINT, request_shutdown)
+
+# ========================================
+# TIMEZONE UTILITIES
+# ========================================
+def get_ist_now():
+    if IST:
+        return datetime.now(IST)
+    return datetime.now()
+
+def format_ist_timestamp(dt=None):
+    if dt is None:
+        dt = get_ist_now()
+    if IST and dt.tzinfo is None:
+        dt = IST.localize(dt)
+    return dt.strftime('%Y-%m-%d %H:%M:%S IST')
 
 
 def analyze_loaded_expiries(instruments_csv='valid_instruments.csv'):
@@ -229,24 +298,32 @@ def insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data):
 
 
 async def handle_message(event):
-    """Handle incoming messages"""
+    """Handle incoming messages with rate limiting"""
+    # Check for shutdown
+    if _shutdown_requested:
+        return
+
     try:
         message_text = event.message.message
         if not message_text:
             return
-        
+
+        # Apply rate limiting
+        rate_limiter.acquire()
+
         channel = await event.get_chat()
         channel_id = str(event.chat_id)
         channel_name = channel.title if hasattr(channel, 'title') else str(channel_id)
         message_id = event.message.id
         message_date = event.message.date.isoformat()
-        
+
         stats['total_messages'] += 1
-        
-        # Log message
+
+        # Log message with IST timestamp
         logger.info("")
         logger.info("="*70)
         logger.info(f"[NEW] {channel_name}")
+        logger.info(f"[TIME] {format_ist_timestamp()}")
         preview = message_text[:60].replace('\n', ' ')
         logger.info(f"[MSG] {preview}...")
         logger.info(f"[DATE] {message_date}")
@@ -375,13 +452,17 @@ def print_stats():
 
 
 if __name__ == '__main__':
+    logger.info(f"[START] JP Telegram Reader starting at {format_ist_timestamp()}")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\n[STOP] Shutting down...")
-        print_stats()
+        if not _shutdown_requested:
+            logger.info("\n[STOP] Shutting down...")
+            print_stats()
     except Exception as e:
         logger.error(f"[FATAL] {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        logger.info(f"[END] JP Telegram Reader stopped at {format_ist_timestamp()}")
     # Note: No db.close() needed - ThreadSafeDB uses connection-per-operation

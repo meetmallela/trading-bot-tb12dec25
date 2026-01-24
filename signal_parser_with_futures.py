@@ -6,16 +6,68 @@ Features:
 2. Regex extraction + Claude API fallback
 3. Auto-enrichment for expiry dates and quantities
 4. Validates and completes all required fields
+5. Claude API cost tracking with daily limits
 """
 
 import re
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, date
 import calendar
 import requests
 from instrument_finder_df import InstrumentFinderDF
 from instrument_finder_FAST import FastInstrumentFinder
+
+
+class ClaudeAPITracker:
+    """Track Claude API usage and enforce daily limits"""
+
+    def __init__(self, daily_limit=100, cost_per_call=0.005):
+        self.daily_limit = daily_limit
+        self.cost_per_call = cost_per_call
+        self.calls_today = 0
+        self.total_cost_today = 0.0
+        self.last_reset_date = date.today()
+        self.logger = logging.getLogger('CLAUDE_API')
+
+    def _reset_if_new_day(self):
+        """Reset counters if it's a new day"""
+        today = date.today()
+        if today > self.last_reset_date:
+            self.logger.info(f"[RESET] New day - resetting API counters (yesterday: {self.calls_today} calls, ${self.total_cost_today:.2f})")
+            self.calls_today = 0
+            self.total_cost_today = 0.0
+            self.last_reset_date = today
+
+    def can_make_call(self):
+        """Check if we can make another API call"""
+        self._reset_if_new_day()
+        return self.calls_today < self.daily_limit
+
+    def record_call(self):
+        """Record an API call"""
+        self._reset_if_new_day()
+        self.calls_today += 1
+        self.total_cost_today += self.cost_per_call
+
+        if self.calls_today % 10 == 0:
+            self.logger.info(f"[USAGE] Claude API: {self.calls_today}/{self.daily_limit} calls today (${self.total_cost_today:.2f})")
+
+        if self.calls_today >= self.daily_limit:
+            self.logger.warning(f"[LIMIT] Daily Claude API limit reached ({self.daily_limit} calls)")
+
+    def get_stats(self):
+        """Get current usage stats"""
+        return {
+            'calls_today': self.calls_today,
+            'daily_limit': self.daily_limit,
+            'remaining': self.daily_limit - self.calls_today,
+            'cost_today': self.total_cost_today
+        }
+
+
+# Global Claude API tracker (shared across instances)
+_claude_tracker = ClaudeAPITracker(daily_limit=100, cost_per_call=0.005)
 
 class SignalParserWithFutures:
     """Parser with OPTIONS + FUTURES support"""
@@ -580,10 +632,15 @@ class SignalParserWithFutures:
         return False
     
     def _extract_with_claude(self, message, is_futures):
-        """Use Claude API as fallback"""
+        """Use Claude API as fallback with cost tracking"""
         if not self.claude_api_key:
             return None
-        
+
+        # Check daily limit before making call
+        if not _claude_tracker.can_make_call():
+            self.logger.warning("[LIMIT] Claude API daily limit reached - skipping API call")
+            return None
+
         try:
             if is_futures:
                 prompt = f"""Extract FUTURES trading signal from this message. Return ONLY a JSON object:
@@ -632,6 +689,9 @@ Return ONLY the JSON, no explanation."""
                 timeout=10
             )
             
+            # Record the API call (even if parsing fails)
+            _claude_tracker.record_call()
+
             if response.status_code == 200:
                 data = response.json()
                 text = data['content'][0]['text']
@@ -646,9 +706,15 @@ Return ONLY the JSON, no explanation."""
                         result['option_type'] = None
                     self.logger.info("[CLAUDE] Successfully parsed with API")
                     return result
-            
+            else:
+                self.logger.warning(f"[CLAUDE] API returned status {response.status_code}")
+
             return None
-            
+
+        except requests.exceptions.Timeout:
+            _claude_tracker.record_call()  # Still count timeouts
+            self.logger.warning("[CLAUDE] API request timed out")
+            return None
         except Exception as e:
             self.logger.error(f"[CLAUDE] Error: {e}")
             return None
