@@ -9,6 +9,7 @@ import sys
 import io
 from datetime import datetime
 from kiteconnect import KiteConnect
+from db_utils import transaction, TransactionError, get_db_connection
 # Fix Windows encoding
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -82,7 +83,10 @@ class OrderPlacerProduction:
         self.kite = kite
         self.test_mode = test_mode
         self.db_path = 'trading.db'
-        
+
+        # Add order tracking columns if they don't exist
+        self._add_order_tracking_columns()
+
         # Load SL exits blacklist (shared with SL monitor)
         self.sl_exits_today = {}
         self._load_sl_exits()
@@ -119,7 +123,28 @@ class OrderPlacerProduction:
             self.col_map = {}
         
         print("[OK] Order Placer initialized")
-    
+
+    def _add_order_tracking_columns(self):
+        """Add order_id and order_status columns to signals table if they don't exist"""
+        try:
+            with get_db_connection(self.db_path) as conn:
+                cursor = conn.cursor()
+                # Check existing columns
+                cursor.execute("PRAGMA table_info(signals)")
+                columns = [row[1] for row in cursor.fetchall()]
+
+                if 'order_id' not in columns:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN order_id TEXT")
+                    logging.info("[DB] Added order_id column for transaction tracking")
+
+                if 'order_status' not in columns:
+                    cursor.execute("ALTER TABLE signals ADD COLUMN order_status TEXT")
+                    logging.info("[DB] Added order_status column for transaction tracking")
+
+                conn.commit()
+        except sqlite3.OperationalError as e:
+            logging.debug(f"[DB] Column check: {e}")
+
     def _load_sl_exits(self):
         """Load SL exits blacklist from file"""
         try:
@@ -451,12 +476,61 @@ class OrderPlacerProduction:
                         raise
             
             return None
-            
+
         except Exception as e:
             logging.error(f"[ERROR] Failed to place futures order: {e}")
             import traceback
             traceback.print_exc()
             return None
+
+    def mark_signal_success(self, signal_id, order_id):
+        """
+        Mark signal as successfully processed with order tracking.
+        Uses transaction to ensure atomicity.
+
+        Args:
+            signal_id: Signal ID in database
+            order_id: Broker order ID returned from order placement
+        """
+        try:
+            with transaction(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """UPDATE signals
+                       SET processed = 1, order_id = ?, order_status = 'PLACED'
+                       WHERE id = ? AND processed = 0""",
+                    (str(order_id), signal_id)
+                )
+                if cursor.rowcount == 0:
+                    logging.warning(f"[WARN] Signal {signal_id} already processed or not found")
+                else:
+                    logging.info(f"[OK] Signal {signal_id} marked as processed with order {order_id}")
+        except TransactionError as e:
+            logging.error(f"[DB ERROR] Failed to mark signal {signal_id}: {e}")
+            raise
+
+    def mark_signal_failed(self, signal_id, reason="ORDER_FAILED"):
+        """
+        Mark signal as failed with reason tracking.
+        Uses transaction to ensure atomicity.
+
+        Args:
+            signal_id: Signal ID in database
+            reason: Failure reason (ORDER_FAILED, VALIDATION_FAILED, etc.)
+        """
+        try:
+            with transaction(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """UPDATE signals
+                       SET processed = -1, order_status = ?
+                       WHERE id = ? AND processed = 0""",
+                    (reason, signal_id)
+                )
+                if cursor.rowcount > 0:
+                    logging.info(f"[MARKED FAILED] Signal {signal_id}: {reason}")
+        except TransactionError as e:
+            logging.error(f"[DB ERROR] Failed to mark signal {signal_id} as failed: {e}")
 
     def process_pending_signals(self):
         conn = sqlite3.connect(self.db_path)
@@ -494,8 +568,7 @@ class OrderPlacerProduction:
                 # Validate signal
                 if not self.validate_signal_data(data):
                     logging.error(f"[SKIP] Signal {sig['id']} - validation failed")
-                    cursor.execute("UPDATE signals SET processed = -1 WHERE id = ?", (sig['id'],))
-                    conn.commit()
+                    self.mark_signal_failed(sig['id'], "VALIDATION_FAILED")
                     continue
                 
                 # ========================================
@@ -526,16 +599,14 @@ class OrderPlacerProduction:
                     if self.is_blocked_from_reentry(check_tradingsymbol):
                         logging.error(f"[BLOCKED] {check_tradingsymbol} hit SL today - NO RE-ENTRY allowed!")
                         logging.error(f"[SKIP] Signal {sig['id']} - preventing revenge trading")
-                        cursor.execute("UPDATE signals SET processed = -1 WHERE id = ?", (sig['id'],))
-                        conn.commit()
+                        self.mark_signal_failed(sig['id'], "SL_REENTRY_BLOCKED")
                         continue
-                    
+
                     # CHECK 2: Do we already have a position in this instrument?
                     if self.check_existing_position(check_tradingsymbol):
                         logging.error(f"[BLOCKED] Already have position in {check_tradingsymbol}")
                         logging.error(f"[SKIP] Signal {sig['id']} - NO AVERAGING DOWN allowed!")
-                        cursor.execute("UPDATE signals SET processed = -1 WHERE id = ?", (sig['id'],))
-                        conn.commit()
+                        self.mark_signal_failed(sig['id'], "POSITION_EXISTS")
                         continue
                 
                 # ========================================
@@ -543,19 +614,18 @@ class OrderPlacerProduction:
                 # ========================================
                 if instrument_type == 'FUTURES':
                     logging.info(f"[FUTURES SIGNAL] Processing...")
-                    
+
                     order_result = self.place_futures_order(data, sig['channel_name'])
-                    
+
                     if order_result:
-                        # Mark as processed
-                        cursor.execute("UPDATE signals SET processed = 1 WHERE id = ?", (sig['id'],))
-                        conn.commit()
+                        # Mark as processed with order tracking (transaction-safe)
+                        order_id = order_result.get('order_id', 'UNKNOWN')
+                        self.mark_signal_success(sig['id'], order_id)
                         logging.info(f"[OK] Futures signal {sig['id']} processed successfully")
                     else:
                         logging.error(f"[FAILED] Futures signal {sig['id']} - order placement failed")
-                        cursor.execute("UPDATE signals SET processed = -1 WHERE id = ?", (sig['id'],))
-                        conn.commit()
-                    
+                        self.mark_signal_failed(sig['id'], "FUTURES_ORDER_FAILED")
+
                     continue  # Skip to next signal
                 
                 # ========================================
@@ -571,8 +641,7 @@ class OrderPlacerProduction:
                     trading_symbol = self.find_exact_tradingsymbol(data)
                     if not trading_symbol:
                         logging.error(f"[SKIP] Signal {sig['id']} - tradingsymbol not found")
-                        cursor.execute("UPDATE signals SET processed = -1 WHERE id = ?", (sig['id'],))
-                        conn.commit()
+                        self.mark_signal_failed(sig['id'], "TRADINGSYMBOL_NOT_FOUND")
                         continue
 
                 logging.info(f"[EXECUTE] Placing order for {trading_symbol}")
@@ -681,9 +750,13 @@ class OrderPlacerProduction:
                                     logging.info(f"[TAG] Order tagged as: {order_tag}")
                             
                             logging.info(f"[SUCCESS] Kite Order ID: {order_id}")
+
+                            # Mark as processed with order tracking (transaction-safe)
+                            self.mark_signal_success(sig['id'], order_id)
+                            logging.info(f"[OK] Signal {sig['id']} processed with order {order_id}")
                             break  # Success, exit retry loop
-                            
-                        except (requests.exceptions.ConnectionError, 
+
+                        except (requests.exceptions.ConnectionError,
                                 requests.exceptions.Timeout,
                                 Exception) as e:
                             if attempt < max_retries - 1:
@@ -705,24 +778,22 @@ class OrderPlacerProduction:
                     logging.info(f"   Exchange: {exchange}")
                     logging.info("[TEST MODE] Order simulation success.")
 
-                # Mark as processed successfully
-                cursor.execute("UPDATE signals SET processed = 1 WHERE id = ?", (sig['id'],))
-                conn.commit()
-                logging.info(f"[OK] Signal {sig['id']} processed successfully")
+                    # Mark as processed in test mode (no real order_id)
+                    self.mark_signal_success(sig['id'], "TEST_MODE")
+                    logging.info(f"[OK] Signal {sig['id']} processed in test mode")
 
             except KeyError as e:
                 logging.error(f"[ERROR] Signal {sig['id']} - Missing key: {e}")
                 logging.error(f"   Available keys: {list(data.keys()) if 'data' in locals() else 'N/A'}")
-                cursor.execute("UPDATE signals SET processed = -1 WHERE id = ?", (sig['id'],))
-                conn.commit()
-                
-            except (requests.exceptions.ConnectionError, 
+                self.mark_signal_failed(sig['id'], f"MISSING_KEY:{e}")
+
+            except (requests.exceptions.ConnectionError,
                     requests.exceptions.Timeout) as e:
                 # Network error - leave signal unprocessed for retry next cycle
                 logging.warning(f"[NETWORK ERROR] Signal {sig['id']} - {e}")
                 logging.warning(f"   Leaving unprocessed for retry in next cycle")
                 # Don't update processed status - will retry next time
-                
+
             except Exception as e:
                 error_str = str(e)
                 # Check if it's a network-related error
@@ -735,8 +806,7 @@ class OrderPlacerProduction:
                     logging.error(f"[ERROR] Signal {sig['id']} - Exception: {e}")
                     import traceback
                     traceback.print_exc()
-                    cursor.execute("UPDATE signals SET processed = -1 WHERE id = ?", (sig['id'],))
-                    conn.commit()
+                    self.mark_signal_failed(sig['id'], f"EXCEPTION:{type(e).__name__}")
         
         conn.close()
 
