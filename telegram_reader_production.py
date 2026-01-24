@@ -121,23 +121,11 @@ except:
 # Initialize Telegram client
 client = TelegramClient('trading_bot', TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
-# Initialize database
-db = sqlite3.connect('trading.db', check_same_thread=False)
-db.execute('''
-    CREATE TABLE IF NOT EXISTS signals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_id TEXT,
-        channel_name TEXT,
-        message_id INTEGER,
-        raw_text TEXT,
-        parsed_data TEXT,
-        timestamp TEXT,
-        processed INTEGER DEFAULT 0,
-        instrument_type TEXT DEFAULT 'OPTIONS',
-        UNIQUE(channel_id, message_id)
-    )
-''')
-db.commit()
+# Initialize thread-safe database
+from db_utils import ThreadSafeDB
+db = ThreadSafeDB('trading.db')
+db.init_signals_table(include_instrument_type=True)
+logging.info("[OK] Thread-safe database initialized")
 
 # Initialize parser with futures support
 parser = SignalParserWithFutures(
@@ -268,44 +256,36 @@ def display_expiry_info():
 
 
 def insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data):
-    """Insert signal into database"""
+    """Insert signal into database (thread-safe with retry logic)"""
     try:
-        cursor = db.cursor()
-        
         # Get instrument type
         instrument_type = parsed_data.get('instrument_type', 'OPTIONS')
-        
-        cursor.execute("""
-            INSERT OR IGNORE INTO signals 
-            (channel_id, channel_name, message_id, raw_text, parsed_data, timestamp, processed, instrument_type)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
-        """, (
-            channel_id,
-            channel_name,
-            message_id,
-            raw_text,
-            json.dumps(parsed_data),
-            datetime.now().isoformat(),
-            instrument_type
-        ))
-        db.commit()
-        
-        if cursor.rowcount > 0:
-            signal_id = cursor.lastrowid
+
+        # Use thread-safe insert with retry logic
+        signal_id = db.insert_signal(
+            channel_id=channel_id,
+            channel_name=channel_name,
+            message_id=message_id,
+            raw_text=raw_text,
+            parsed_data=parsed_data,
+            instrument_type=instrument_type
+        )
+
+        if signal_id:
             stats['stored_signals'] += 1
-            
+
             # Track by type
             if instrument_type == 'FUTURES':
                 stats['futures_signals'] += 1
             else:
                 stats['options_signals'] += 1
-            
+
             logging.info(f"[✓ STORED] Signal ID: {signal_id} | Type: {instrument_type}")
             return signal_id
         else:
             logging.info(f"[SKIP] Duplicate message (Channel: {channel_name}, Msg ID: {message_id})")
             return None
-        
+
     except Exception as e:
         logging.error(f"[✗ DB ERROR] {e}")
         return None
@@ -461,5 +441,4 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         logging.info("\n[STOP] Shutting down...")
         print_stats()
-    finally:
-        db.close()
+    # Note: No db.close() needed - ThreadSafeDB uses connection-per-operation

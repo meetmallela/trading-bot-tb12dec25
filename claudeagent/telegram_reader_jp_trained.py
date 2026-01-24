@@ -1,7 +1,12 @@
 """
-telegram_reader_jp_trained.py
+telegram_reader_jp_trained.py - ENHANCED VERSION
 Telegram reader for JP channel using TRAINED agent
 Uses KB with 184 human-verified corrections for 98%+ accuracy
+
+NEW FEATURES:
+- Shows NIFTY/SENSEX/BANKNIFTY expiry dates on startup
+- Timestamped log files (telegram_jp_22JAN2026_14_30_45.log)
+- Validates instruments loaded from CSV
 """
 
 import asyncio
@@ -12,19 +17,25 @@ import io
 from datetime import datetime
 from telethon import TelegramClient, events
 from jp_channel_agent_trained import JPChannelAgentTrained
+import pandas as pd
+from collections import defaultdict
 
 # Fix Windows encoding
 if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-# Configure logging
+# Generate timestamped log filename
+startup_time = datetime.now()
+log_filename = startup_time.strftime('telegram_jp_%d%b%Y_%H_%M_%S.log').upper()
+
+# Configure logging with timestamped filename
 import logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('telegram_jp_trained.log', encoding='utf-8'),
+        logging.FileHandler(log_filename, encoding='utf-8'),
         logging.StreamHandler(
             io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
             if sys.platform == 'win32' else sys.stdout
@@ -59,24 +70,14 @@ JP_CHANNEL_ID = -1003282204738
 # Initialize client
 client = TelegramClient('jp_trained_bot', API_ID, API_HASH)
 
-# Initialize database
-db = sqlite3.connect('jp_signals_trained.db', check_same_thread=False)
-db.execute('''
-    CREATE TABLE IF NOT EXISTS signals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        channel_id TEXT,
-        channel_name TEXT,
-        message_id INTEGER,
-        raw_text TEXT,
-        parsed_data TEXT,
-        timestamp TEXT,
-        processed INTEGER DEFAULT 0,
-        parser_type TEXT,
-        signal_type TEXT,
-        UNIQUE(channel_id, message_id)
-    )
-''')
-db.commit()
+# Initialize thread-safe database
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from db_utils import ThreadSafeDB
+db = ThreadSafeDB('jp_signals_trained.db')
+db.init_signals_table(include_instrument_type=False)
+logger.info("[OK] Thread-safe database initialized")
 
 # Initialize trained agent
 logger.info("[INIT] Loading trained agent with KB...")
@@ -99,36 +100,129 @@ stats = {
 }
 
 
-def insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data):
-    """Insert signal into database"""
+def analyze_loaded_expiries(instruments_csv='valid_instruments.csv'):
+    """Analyze and report expiry dates for key indices"""
+    
+    logger.info("")
+    logger.info("="*70)
+    logger.info("📅 LOADED EXPIRY DATES ANALYSIS")
+    logger.info("="*70)
+    
     try:
-        cursor = db.cursor()
+        # Load instruments
+        df = pd.read_csv(instruments_csv)
+        
+        # Convert expiry to datetime
+        df['expiry_dt'] = pd.to_datetime(df['expiry_date'])
+        
+        # Get current month
+        current_month = startup_time.month
+        current_year = startup_time.year
+        
+        # Filter for current month
+        df_current_month = df[
+            (df['expiry_dt'].dt.month == current_month) &
+            (df['expiry_dt'].dt.year == current_year)
+        ]
+        
+        logger.info(f"Current Month: {startup_time.strftime('%B %Y')}")
+        logger.info(f"Total instruments loaded: {len(df)}")
+        logger.info(f"Current month instruments: {len(df_current_month)}")
+        logger.info("")
+        
+        # Analyze each index
+        indices = {
+            'NIFTY': 'NIFTY 50 (Weekly + Monthly)',
+            'SENSEX': 'SENSEX (Weekly + Monthly)',
+            'BANKNIFTY': 'BANK NIFTY',
+            'FINNIFTY': 'FIN NIFTY',
+            'MIDCPNIFTY': 'MIDCAP NIFTY'
+        }
+        
+        for symbol, full_name in indices.items():
+            # Get expiries for this symbol
+            symbol_df = df_current_month[df_current_month['symbol'] == symbol]
+            
+            if len(symbol_df) == 0:
+                logger.info(f"⚠️  {full_name}: No expiries found")
+                continue
+            
+            # Get unique expiry dates
+            expiries = sorted(symbol_df['expiry_dt'].unique())
+            
+            logger.info(f"✅ {full_name}:")
+            logger.info(f"   Total expiries this month: {len(expiries)}")
+            
+            # Show each expiry
+            for exp_dt in expiries:
+                exp_date = pd.to_datetime(exp_dt)
+                day_name = exp_date.strftime('%A')
+                date_str = exp_date.strftime('%d %b %Y')
+                
+                # Count strikes available
+                strikes_count = len(symbol_df[symbol_df['expiry_dt'] == exp_dt]['strike'].unique())
+                
+                # Determine if weekly or monthly
+                is_last_week = exp_date.day > 21
+                expiry_type = "Monthly" if is_last_week else "Weekly"
+                
+                logger.info(f"      {date_str} ({day_name}) - {expiry_type} - {strikes_count} strikes")
+            
+            logger.info("")
+        
+        # Show next 3 upcoming expiries for NIFTY
+        logger.info("📌 UPCOMING NIFTY EXPIRIES:")
+        nifty_future = df[
+            (df['symbol'] == 'NIFTY') &
+            (df['expiry_dt'] > startup_time)
+        ]
+        
+        if len(nifty_future) > 0:
+            next_expiries = sorted(nifty_future['expiry_dt'].unique())[:3]
+            
+            for exp_dt in next_expiries:
+                exp_date = pd.to_datetime(exp_dt)
+                day_name = exp_date.strftime('%A')
+                date_str = exp_date.strftime('%d %b %Y')
+                days_away = (exp_date - startup_time).days
+                
+                logger.info(f"   {date_str} ({day_name}) - {days_away} days away")
+        
+        logger.info("")
+        logger.info("="*70)
+        
+    except FileNotFoundError:
+        logger.error(f"❌ Instruments file not found: {instruments_csv}")
+    except Exception as e:
+        logger.error(f"❌ Error analyzing expiries: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data):
+    """Insert signal into database (thread-safe with retry logic)"""
+    try:
         signal_type = parsed_data.get('message_type', 'trained')
-        
-        cursor.execute("""
-            INSERT OR IGNORE INTO signals 
-            (channel_id, channel_name, message_id, raw_text, parsed_data, timestamp, processed, parser_type, signal_type)
-            VALUES (?, ?, ?, ?, ?, ?, 0, 'TRAINED_AGENT', ?)
-        """, (
-            channel_id,
-            channel_name,
-            message_id,
-            raw_text,
-            json.dumps(parsed_data),
-            datetime.now().isoformat(),
-            signal_type
-        ))
-        db.commit()
-        
-        if cursor.rowcount > 0:
-            signal_id = cursor.lastrowid
+
+        # Use thread-safe insert with retry logic
+        signal_id = db.insert_signal(
+            channel_id=channel_id,
+            channel_name=channel_name,
+            message_id=message_id,
+            raw_text=raw_text,
+            parsed_data=parsed_data,
+            parser_type='TRAINED_AGENT',
+            signal_type=signal_type
+        )
+
+        if signal_id:
             stats['stored_signals'] += 1
             logger.info(f"[STORED] Signal ID: {signal_id}")
             return signal_id
         else:
             logger.info(f"[SKIP] Duplicate message")
             return None
-        
+
     except Exception as e:
         logger.error(f"[DB ERROR] {e}")
         return None
@@ -200,10 +294,24 @@ async def main():
     print("\n" + "="*70)
     print("JP CHANNEL TELEGRAM READER - TRAINED AGENT")
     print("="*70)
+    print(f"Started: {startup_time.strftime('%d %b %Y %H:%M:%S')}")
+    print(f"Log File: {log_filename}")
     print(f"Training: {len(agent.training_examples)} human-verified examples")
     print(f"Accuracy: 98%+ (regex + Claude + KB)")
     print("="*70)
     print()
+    
+    # Log startup info
+    logger.info("="*70)
+    logger.info("TELEGRAM READER - STARTUP")
+    logger.info("="*70)
+    logger.info(f"Started: {startup_time.strftime('%d %b %Y %H:%M:%S')}")
+    logger.info(f"Log File: {log_filename}")
+    logger.info(f"Training Examples: {len(agent.training_examples)}")
+    logger.info("="*70)
+    
+    # Analyze and show expiry dates
+    analyze_loaded_expiries()
     
     await client.start(PHONE)
     
@@ -248,6 +356,7 @@ def print_stats():
     logger.info("="*70)
     logger.info("SESSION STATISTICS")
     logger.info("="*70)
+    logger.info(f"Session Duration: {datetime.now() - startup_time}")
     logger.info(f"Total Messages:     {stats['total_messages']}")
     logger.info(f"Parsed Signals:     {stats['parsed_signals']}")
     logger.info(f"  - Regex (free):   {stats['regex_parsed']}")
@@ -262,6 +371,7 @@ def print_stats():
         logger.info(f"Success Rate:       {success_rate:.1f}%")
     
     logger.info("="*70)
+    logger.info(f"Log saved to: {log_filename}")
 
 
 if __name__ == '__main__':
@@ -274,5 +384,4 @@ if __name__ == '__main__':
         logger.error(f"[FATAL] {e}")
         import traceback
         traceback.print_exc()
-    finally:
-        db.close()
+    # Note: No db.close() needed - ThreadSafeDB uses connection-per-operation
