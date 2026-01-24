@@ -3,6 +3,10 @@ order_placer_jp_trained.py
 Order placer for JP channel trained signals
 Reads from: jp_signals_trained.db
 Places orders via Zerodha Kite
+
+FIXED: Smart order type selection
+- Index options: MARKET (liquid)
+- Stock options: LIMIT at entry price (illiquid, prevents Zerodha rejection)
 """
 
 import sqlite3
@@ -34,19 +38,54 @@ logging.basicConfig(
     ]
 )
 
-def initialize_kite_with_retry(config):
-    """Retries connection infinitely to handle internet/DNS flickers."""
-    while True:
+def initialize_kite_with_retry(config, max_retries=30, initial_delay=10):
+    """
+    Retries connection with timeout to handle internet/DNS flickers.
+
+    Args:
+        config: Kite configuration dict with api_key and access_token
+        max_retries: Maximum number of retry attempts (default: 30 = ~5 minutes)
+        initial_delay: Initial delay between retries in seconds (default: 10)
+
+    Returns:
+        KiteConnect instance on success
+
+    Raises:
+        RuntimeError: If all retries exhausted or auth error detected
+    """
+    delay = initial_delay
+
+    for attempt in range(1, max_retries + 1):
         try:
-            logging.info("[CONNECT] Attempting Kite login...")
+            logging.info(f"[CONNECT] Attempting Kite login (attempt {attempt}/{max_retries})...")
             kite = KiteConnect(api_key=config['api_key'])
             kite.set_access_token(config['access_token'])
             kite.profile()
             logging.info("[OK] Kite Connected successfully.")
             return kite
+
         except Exception as e:
-            logging.error(f"[RETRY] Connection failed: {e}. Checking in 10s...")
-            time.sleep(10)
+            error_str = str(e).lower()
+
+            # Check for authentication errors - fail fast, don't retry
+            auth_errors = ['invalid', 'token', 'expired', 'unauthorized', 'forbidden', 'api_key']
+            if any(err in error_str for err in auth_errors):
+                logging.error(f"[AUTH ERROR] {e}")
+                logging.error("[FATAL] Authentication failed - check your api_key and access_token in kite_config.json")
+                logging.error("[HINT] Access tokens expire daily. Regenerate at https://kite.zerodha.com/")
+                raise RuntimeError(f"Authentication failed: {e}")
+
+            # Network/transient error - retry with backoff
+            if attempt < max_retries:
+                logging.warning(f"[RETRY {attempt}/{max_retries}] Connection failed: {e}")
+                logging.info(f"[WAIT] Retrying in {delay} seconds...")
+                time.sleep(delay)
+                # Exponential backoff capped at 60 seconds
+                delay = min(delay * 1.5, 60)
+            else:
+                logging.error(f"[FATAL] All {max_retries} connection attempts failed")
+                logging.error(f"[LAST ERROR] {e}")
+                raise RuntimeError(f"Failed to connect to Kite after {max_retries} attempts: {e}")
 
 class OrderPlacerJPTrained:
     def __init__(self, kite, test_mode=False):
@@ -115,18 +154,8 @@ class OrderPlacerJPTrained:
             logging.error(f"[ERROR] Failed to build tradingsymbol: {e}")
             return None
     
-    def generate_order_tag(self, channel_name):
-        """Generate order tag from channel name (max 20 chars)
-        Format: BOT:channel_abbr
-        """
-        # Truncate channel name to fit in tag (max 20 chars total)
-        # BOT: takes 4 chars, leaving 16 for channel
-        channel_abbr = channel_name[:16] if len(channel_name) <= 16 else channel_name[:16]
-        tag = f"BOT:{channel_abbr}"
-        return tag
-    
-    def place_order_with_retry(self, signal_data, channel_name="JP", variety='regular', max_retries=3):
-        """Place order with network retry logic"""
+    def place_order_with_retry(self, signal_data, variety='regular', max_retries=3):
+        """Place order with network retry logic and smart order type selection"""
         
         if not self.test_mode:
             # Validate tradingsymbol exists before placing order
@@ -139,6 +168,8 @@ class OrderPlacerJPTrained:
         exchange = signal_data.get('exchange', 'NFO')
         action = signal_data.get('action', 'BUY')
         quantity = signal_data.get('quantity', 1)
+        symbol = signal_data.get('symbol', '')
+        entry_price = signal_data.get('entry_price', 0)
         
         logging.info(f"[ORDER] {action} {quantity} {tradingsymbol} @ {exchange}")
         
@@ -148,27 +179,44 @@ class OrderPlacerJPTrained:
             logging.info(f"  Exchange: {exchange}")
             logging.info(f"  Action: {action}")
             logging.info(f"  Quantity: {quantity}")
-            logging.info(f"  Type: MARKET")
+            logging.info(f"  Type: {'MARKET' if self._is_index(symbol) else f'LIMIT @ {entry_price}'}")
             return {'test_mode': True, 'order_id': 'TEST123'}
         
         # Place order with retry
         for attempt in range(max_retries):
             try:
-                # Generate tag
-                order_tag = self.generate_order_tag(channel_name)
+                # Smart order type selection
+                # Index options: MARKET (liquid, fast execution)
+                # Stock options: LIMIT (illiquid, prevents Zerodha rejection)
+                INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX']
+                is_index = symbol in INDEX_SYMBOLS
                 
-                order_id = self.kite.place_order(
-                    variety=variety,
-                    exchange=exchange,
-                    tradingsymbol=tradingsymbol,
-                    transaction_type=action,
-                    quantity=quantity,
-                    order_type='MARKET',
-                    product='NRML',  # Changed from MIS to NRML
-                    tag=order_tag
-                )
+                if is_index:
+                    # Index options are liquid - use MARKET
+                    logging.info(f"[INDEX] Using MARKET order (liquid)")
+                    order_id = self.kite.place_order(
+                        variety=variety,
+                        exchange=exchange,
+                        tradingsymbol=tradingsymbol,
+                        transaction_type=action,
+                        quantity=quantity,
+                        order_type='MARKET',
+                        product='NRML'
+                    )
+                else:
+                    # Stock options are illiquid - use LIMIT at entry price
+                    logging.info(f"[STOCK] Using LIMIT order @ {entry_price} (illiquid)")
+                    order_id = self.kite.place_order(
+                        variety=variety,
+                        exchange=exchange,
+                        tradingsymbol=tradingsymbol,
+                        transaction_type=action,
+                        quantity=quantity,
+                        order_type='LIMIT',
+                        price=entry_price,  # Use entry price as limit
+                        product='NRML'
+                    )
                 
-                logging.info(f"[TAG] Order tagged as: {order_tag}")
                 logging.info(f"[SUCCESS] Order placed: {order_id}")
                 return {'order_id': order_id, 'success': True}
                 
@@ -179,6 +227,11 @@ class OrderPlacerJPTrained:
                 else:
                     logging.error(f"[FAILED] Order failed after {max_retries} attempts")
                     return {'success': False, 'error': str(e)}
+    
+    def _is_index(self, symbol):
+        """Helper: Check if symbol is an index"""
+        INDEX_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX', 'BANKEX']
+        return symbol in INDEX_SYMBOLS
     
     def process_unprocessed_signals(self):
         """Process all unprocessed signals from JP database - with 30-min freshness check"""
@@ -267,7 +320,7 @@ class OrderPlacerJPTrained:
                     logging.info(f"   Exchange: {parsed_data.get('exchange')} | Quantity: {parsed_data.get('quantity')}")
                     
                     # Place order
-                    result = self.place_order_with_retry(parsed_data, signal['channel_name'])
+                    result = self.place_order_with_retry(parsed_data)
                     
                     if result and result.get('success', False):
                         # Mark as processed - SUCCESS
@@ -333,11 +386,14 @@ def main():
     
     print("")
     print("="*70)
-    print("JP ORDER PLACER - TRAINED AGENT")
+    print("JP ORDER PLACER - TRAINED AGENT (FIXED)")
     print("="*70)
     print(f"Mode: {'TEST' if args.test else 'LIVE'}")
     print(f"Database: jp_signals_trained.db")
     print(f"Monitoring: {'Yes' if args.continuous else 'One-time'}")
+    print("Order types:")
+    print("  • Index options: MARKET (liquid)")
+    print("  • Stock options: LIMIT @ entry price (illiquid)")
     print("="*70)
     print("")
     

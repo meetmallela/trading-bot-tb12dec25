@@ -27,19 +27,54 @@ logging.basicConfig(
     ]
 )
 
-def initialize_kite_with_retry(config):
-    """Retries connection infinitely to handle internet/DNS flickers."""
-    while True:
+def initialize_kite_with_retry(config, max_retries=30, initial_delay=10):
+    """
+    Retries connection with timeout to handle internet/DNS flickers.
+
+    Args:
+        config: Kite configuration dict with api_key and access_token
+        max_retries: Maximum number of retry attempts (default: 30 = ~5 minutes)
+        initial_delay: Initial delay between retries in seconds (default: 10)
+
+    Returns:
+        KiteConnect instance on success
+
+    Raises:
+        RuntimeError: If all retries exhausted or auth error detected
+    """
+    delay = initial_delay
+
+    for attempt in range(1, max_retries + 1):
         try:
-            logging.info("[CONNECT] Attempting Kite login...")
+            logging.info(f"[CONNECT] Attempting Kite login (attempt {attempt}/{max_retries})...")
             kite = KiteConnect(api_key=config['api_key'])
             kite.set_access_token(config['access_token'])
             kite.profile()
             logging.info("[OK] Kite Connected successfully.")
             return kite
+
         except Exception as e:
-            logging.error(f"[RETRY] Connection failed: {e}. Checking in 10s...")
-            time.sleep(10)
+            error_str = str(e).lower()
+
+            # Check for authentication errors - fail fast, don't retry
+            auth_errors = ['invalid', 'token', 'expired', 'unauthorized', 'forbidden', 'api_key']
+            if any(err in error_str for err in auth_errors):
+                logging.error(f"[AUTH ERROR] {e}")
+                logging.error("[FATAL] Authentication failed - check your api_key and access_token in kite_config.json")
+                logging.error("[HINT] Access tokens expire daily. Regenerate at https://kite.zerodha.com/")
+                raise RuntimeError(f"Authentication failed: {e}")
+
+            # Network/transient error - retry with backoff
+            if attempt < max_retries:
+                logging.warning(f"[RETRY {attempt}/{max_retries}] Connection failed: {e}")
+                logging.info(f"[WAIT] Retrying in {delay} seconds...")
+                time.sleep(delay)
+                # Exponential backoff capped at 60 seconds
+                delay = min(delay * 1.5, 60)
+            else:
+                logging.error(f"[FATAL] All {max_retries} connection attempts failed")
+                logging.error(f"[LAST ERROR] {e}")
+                raise RuntimeError(f"Failed to connect to Kite after {max_retries} attempts: {e}")
 
 class OrderPlacerProduction:
     def __init__(self, kite, test_mode=False):
@@ -605,13 +640,12 @@ class OrderPlacerProduction:
                                 is_stock_opt = self.is_stock_option(trading_symbol, exchange)
                                 
                                 if is_stock_opt:
-                                    # Stock options: Use LIMIT order with 5% buffer
+                                    # Stock options: Use LIMIT order at entry price (no buffer)
+                                    # Zerodha blocks MARKET orders for illiquid stock options
                                     entry_price = data.get('entry_price', 0)
                                     
-                                    if data['action'].upper() == 'BUY':
-                                        limit_price = entry_price * 1.05  # 5% above for BUY
-                                    else:
-                                        limit_price = entry_price * 0.95  # 5% below for SELL
+                                    # Use entry price directly (no 5% buffer)
+                                    limit_price = entry_price
                                     
                                     # Round to tick size (0.05 for most options)
                                     tick_size = 0.05
@@ -629,7 +663,7 @@ class OrderPlacerProduction:
                                         price=limit_price,
                                         tag=order_tag
                                     )
-                                    logging.info(f"[STOCK OPTION] Using LIMIT order at {limit_price} (entry: {entry_price})")
+                                    logging.info(f"[STOCK OPTION] Using LIMIT order at {limit_price} (entry: {entry_price}, illiquid)")
                                     logging.info(f"[TAG] Order tagged as: {order_tag}")
                                 else:
                                     # Index options: Use MARKET order as usual
