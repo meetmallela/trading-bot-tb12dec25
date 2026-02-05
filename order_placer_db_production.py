@@ -15,8 +15,8 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
-# Configure logging
-log_filename = f"order_placer_{datetime.now().strftime('%d%b%Y_%H_%M_%S')}.log".upper()
+# Configure logging with timestamped filename
+log_filename = f"order_placer_db_production_{datetime.now().strftime('%d%b%y_%I%M%S_%p').upper()}.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - ORDER_PLACER - %(levelname)s - %(message)s',

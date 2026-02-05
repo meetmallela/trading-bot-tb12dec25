@@ -32,15 +32,17 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 from kiteconnect import KiteConnect
 
-# Configure logging
+# Configure logging with timestamped filename
+log_filename = f"sl_monitor_with_trailing_ATR_v2_{datetime.now().strftime('%d%b%y_%I%M%S_%p').upper()}.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - SL_MONITOR - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('sl_monitor.log', encoding='utf-8'),
+        logging.FileHandler(log_filename, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
+logging.info(f"[LOG] Writing to: {log_filename}")
 
 # ========================================
 # TELEGRAM NOTIFICATIONS (PRO Feature)

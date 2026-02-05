@@ -33,7 +33,7 @@ if sys.platform == 'win32':
 
 # Generate timestamped log filename
 log_start_time = datetime.now()
-log_filename = log_start_time.strftime('telegram_reader_%d%b%Y_%H_%M_%S.log')
+log_filename = f"telegram_reader_production_{log_start_time.strftime('%d%b%y_%I%M%S_%p').upper()}.log"
 
 # Load Telegram API credentials from config file
 import os
