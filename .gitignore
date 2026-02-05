@@ -28,12 +28,24 @@ valid_instruments.csv
 .DS_Store
 Thumbs.db
 
-echo. >> .gitignore
-echo # Security - Never commit secrets >> .gitignore
-echo auth_with_token_save.py >> .gitignore
-echo kite_config.json >> .gitignore
-echo .env >> .gitignore
-echo *.session >> .gitignore
-echo trading.db >> .gitignore
-echo *.log >> .gitignore
-echo *.LOG >> .gitignore
+# Secrets and credentials
+auth_with_token_save.py
+kite_config.json
+.env
+*.session
+claude_api_key.txt
+
+# Database and logs
+trading.db
+*.log
+*.LOG
+
+# Archives
+archive/
+archive_old_versions/
+files/
+
+# Temporary files
+__pycache__/
+*.pyc
+.claude/
