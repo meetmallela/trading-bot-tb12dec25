@@ -15,7 +15,6 @@ import logging
 from datetime import datetime, date
 import calendar
 import requests
-from instrument_finder_df import InstrumentFinderDF
 from instrument_finder_FAST import FastInstrumentFinder
 
 
@@ -128,6 +127,23 @@ class SignalParserWithFutures:
             'LEAD': 5000,
             'NICKEL': 250,
             'ALUMINIUM': 5000
+        }
+
+        # MCX Options lot sizes (different from futures)
+        self.mcx_options_lot_sizes = {
+            'GOLD': 1,
+            'GOLDM': 1,
+            'GOLDPETAL': 1,
+            'SILVER': 100,
+            'SILVERM': 100,
+            'SILVERMIC': 1,
+            'CRUDEOIL': 10,
+            'NATURALGAS': 250,
+            'COPPER': 250,
+            'ZINC': 250,
+            'LEAD': 250,
+            'NICKEL': 50,
+            'ALUMINIUM': 250
         }
     
     def parse(self, message, channel_id=None):

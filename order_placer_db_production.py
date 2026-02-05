@@ -16,11 +16,12 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # Configure logging
+log_filename = f"order_placer_{datetime.now().strftime('%d%b%Y_%H_%M_%S')}.log".upper()
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - ORDER_PLACER - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('order_placer.log', encoding='utf-8'),
+        logging.FileHandler(log_filename, encoding='utf-8'),
         logging.StreamHandler(
             io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
             if sys.platform == 'win32' else sys.stdout
@@ -654,7 +655,7 @@ class OrderPlacerProduction:
                     else:
                         # Fallback: determine from symbol
                         symbol = data['symbol'].upper()
-                        if symbol in ['CRUDEOIL', 'CRUDEOILM', 'GOLD', 'GOLDM', 'GOLDPETAL', 'SILVER', 'SILVERM', 'SILVERMIC', 'NATURALGAS', 'COPPER', 'ZINC', 'LEAD', 'NICKEL', 'ALUMINIUM']:
+                        if symbol in ['CRUDEOIL', 'CRUDEOILM', 'CRUDE', 'GOLD', 'GOLDM', 'GOLDPETAL', 'SILVER', 'SILVERM', 'SILVERMIC', 'NATURALGAS', 'COPPER', 'ZINC', 'LEAD', 'NICKEL', 'ALUMINIUM']:
                             exchange = "MCX"
                         elif symbol in ['SENSEX', 'BANKEX']:
                             exchange = "BFO"
@@ -694,7 +695,7 @@ class OrderPlacerProduction:
                                     tradingsymbol=trading_symbol,
                                     transaction_type=self.kite.TRANSACTION_TYPE_BUY if data['action'].upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
                                     quantity=int(data['quantity']),
-                                    product=self.kite.PRODUCT_MIS,
+                                    product=self.kite.PRODUCT_NRML,  # Changed from MIS to NRML
                                     order_type=self.kite.ORDER_TYPE_LIMIT,  # LIMIT for MCX
                                     price=limit_price,
                                     tag=order_tag
@@ -727,7 +728,7 @@ class OrderPlacerProduction:
                                         tradingsymbol=trading_symbol,
                                         transaction_type=self.kite.TRANSACTION_TYPE_BUY if data['action'].upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
                                         quantity=int(data['quantity']),
-                                        product=self.kite.PRODUCT_MIS,
+                                        product=self.kite.PRODUCT_NRML,  # Changed from MIS to NRML
                                         order_type=self.kite.ORDER_TYPE_LIMIT,
                                         price=limit_price,
                                         tag=order_tag
@@ -742,7 +743,7 @@ class OrderPlacerProduction:
                                         tradingsymbol=trading_symbol,
                                         transaction_type=self.kite.TRANSACTION_TYPE_BUY if data['action'].upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
                                         quantity=int(data['quantity']),
-                                        product=self.kite.PRODUCT_MIS,
+                                        product=self.kite.PRODUCT_NRML,  # Changed from MIS to NRML
                                         order_type=self.kite.ORDER_TYPE_MARKET,
                                         tag=order_tag
                                     )
@@ -769,7 +770,7 @@ class OrderPlacerProduction:
                 else:
                     # Test mode - show what would be placed
                     symbol = data['symbol'].upper()
-                    if symbol in ['CRUDEOIL', 'CRUDEOILM', 'GOLD', 'GOLDM', 'SILVER', 'SILVERM']:
+                    if symbol in ['CRUDEOIL', 'CRUDEOILM', 'CRUDE', 'GOLD', 'GOLDM', 'GOLDPETAL', 'SILVER', 'SILVERM', 'SILVERMIC', 'NATURALGAS', 'COPPER', 'ZINC', 'LEAD', 'NICKEL', 'ALUMINIUM']:
                         exchange = "MCX"
                     elif symbol in ['SENSEX', 'BANKEX']:
                         exchange = "BFO"

@@ -86,7 +86,7 @@ MONITORED_CHANNELS = [
    # -1002431924245,  # MCX JACKPOT TRADING
    # -1001389090145,  # Stockpro Online
    # -1001456128948,  # Ashish Kyal Trading Gurukul
-   # -1003282204738,  # JP Paper trade - Dec-25
+    -1003282204738,  # JP Paper trade - Dec-25
     -1001801974768,  # New Channel 1
     -1001200390337,  # New Channel 2
 ]
@@ -148,6 +148,39 @@ parser = SignalParserWithFutures(
     claude_api_key=claude_api_key,
     rules_file='parsing_rules_enhanced_v2.json'
 )
+
+# ========================================
+# CRITICAL FIX: Patch parser for correct tradingsymbol format
+# ========================================
+from tradingsymbol_utils import get_correct_tradingsymbol
+
+original_parse = parser.parse
+
+def patched_parse(message, **kwargs):
+    """Wrapper that fixes tradingsymbol format after parsing"""
+    result = original_parse(message, **kwargs)
+    
+    if result and 'tradingsymbol' in result:
+        # Regenerate tradingsymbol with correct format for OPTIONS
+        if 'strike' in result and result.get('instrument_type', 'OPTIONS') == 'OPTIONS':
+            try:
+                correct_ts = get_correct_tradingsymbol(
+                    symbol=result['symbol'],
+                    strike=result['strike'],
+                    option_type=result['option_type'],
+                    expiry_date=result['expiry_date']
+                )
+                if correct_ts != result['tradingsymbol']:
+                    logging.info(f"[FIX] Corrected: {result['tradingsymbol']} → {correct_ts}")
+                    result['tradingsymbol'] = correct_ts
+            except Exception as e:
+                logging.warning(f"[WARN] Could not fix tradingsymbol: {e}")
+    
+    return result
+
+parser.parse = patched_parse
+logging.info("[OK] Parser patched with correct tradingsymbol format (NIFTY/SENSEX weekly fix applied)")
+
 
 if FUTURES_SUPPORT:
     logging.info(f"[OK] Using SignalParserWithFutures (OPTIONS + FUTURES support)")
@@ -512,14 +545,7 @@ async def main():
     @client.on(events.NewMessage(chats=channel_entities))
     async def handler(event):
         await handle_message(event)
-    
-    # CRITICAL FIX: Also create a catch-all handler for the problematic channel
-    # This ensures we don't miss messages even if entity subscription fails
-    @client.on(events.NewMessage(chats=[-1003282204738]))
-    async def jp_handler(event):
-        logging.info("[JP SPECIAL] Got message from JP Paper trade!")
-        await handle_message(event)
-    
+
     # Run until disconnected
     await client.run_until_disconnected()
 
