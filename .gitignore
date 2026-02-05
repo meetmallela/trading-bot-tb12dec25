@@ -2,6 +2,7 @@
 kite_config.json
 telegram_config.json
 claude_api_key.txt
+auth_with_token_save.py
 claudeagent/telegram_config.json
 claudeagent/claude_api_key.txt
 *.env
@@ -26,3 +27,13 @@ valid_instruments.csv
 # System files
 .DS_Store
 Thumbs.db
+
+echo. >> .gitignore
+echo # Security - Never commit secrets >> .gitignore
+echo auth_with_token_save.py >> .gitignore
+echo kite_config.json >> .gitignore
+echo .env >> .gitignore
+echo *.session >> .gitignore
+echo trading.db >> .gitignore
+echo *.log >> .gitignore
+echo *.LOG >> .gitignore
