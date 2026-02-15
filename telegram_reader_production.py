@@ -214,30 +214,93 @@ if MULTI_MESSAGE_SUPPORT:
     logging.info("[OK] Multi-message signal combiner initialized (window=30s, max=5)")
 
     # ---- Channel-specific rules ----
-    # Configure per-channel combining behaviour below.
-    # Set always_single_message=True for channels that always send complete signals.
-    # Adjust combination_window_seconds for channels with slower/faster multi-part signals.
-    #
-    # Example (uncomment and set your channel IDs):
-    #
-    # signal_combiner.add_channel_rules("-1002498088029", ChannelSpecificRules(
-    #     channel_name="RJ - STUDENT PRACTICE CALLS",
-    #     combination_window_seconds=20,
-    #     max_messages_to_combine=3,
-    # ))
-    #
-    # signal_combiner.add_channel_rules("-1003089362819", ChannelSpecificRules(
-    #     channel_name="Paid Premium group",
-    #     always_single_message=True,  # This channel sends complete signals
-    # ))
-    #
-    # signal_combiner.add_channel_rules("-1002770917134", ChannelSpecificRules(
-    #     channel_name="MCX PREMIUM",
-    #     combination_window_seconds=45,  # MCX signals sometimes arrive slower
-    #     noise_patterns=[r'(?i)^(market\s+update|news)'],
-    # ))
 
-    logging.info("[OK] Channel rules configured (edit telegram_reader_production.py to customize)")
+    # Active channels - single-message only (send complete signals)
+    signal_combiner.add_channel_rules("-1002498088029", ChannelSpecificRules(
+        channel_name="RJ - STUDENT PRACTICE CALLS",
+        always_single_message=True,
+    ))
+    signal_combiner.add_channel_rules("-1002770917134", ChannelSpecificRules(
+        channel_name="MCX PREMIUM",
+        always_single_message=True,
+    ))
+    signal_combiner.add_channel_rules("-1002842854743", ChannelSpecificRules(
+        channel_name="VIP RJ Paid Education Purpose",
+        always_single_message=True,
+    ))
+    signal_combiner.add_channel_rules("-1003089362819", ChannelSpecificRules(
+        channel_name="Paid Premium group",
+        always_single_message=True,
+    ))
+    signal_combiner.add_channel_rules("-1001903138387", ChannelSpecificRules(
+        channel_name="COPY MY TRADES BANKNIFTY",
+        always_single_message=True,
+    ))
+    signal_combiner.add_channel_rules("-1002380215256", ChannelSpecificRules(
+        channel_name="PREMIUM_GROUP",
+        always_single_message=True,
+    ))
+    signal_combiner.add_channel_rules("-1002201480769", ChannelSpecificRules(
+        channel_name="Trader ayushi",
+        always_single_message=True,
+    ))
+    signal_combiner.add_channel_rules("-1001801974768", ChannelSpecificRules(
+        channel_name="New Channel 1",
+        always_single_message=True,
+    ))
+
+    # JP Paper trade - single-message only (has dedicated parser)
+    signal_combiner.add_channel_rules("-1003282204738", ChannelSpecificRules(
+        channel_name="JP Paper trade - Dec-25",
+        always_single_message=True,
+    ))
+
+    # New Channel 2 - multi-message combining enabled (splits signals across messages)
+    signal_combiner.add_channel_rules("-1001200390337", ChannelSpecificRules(
+        channel_name="New Channel 2",
+        combination_window_seconds=30,
+        max_messages_to_combine=5,
+    ))
+
+    # Noisy channels (currently disabled, rules ready for when re-enabled)
+    signal_combiner.add_channel_rules("-1001456128948", ChannelSpecificRules(
+        channel_name="Ashish Kyal Trading Gurukul",
+        always_single_message=True,
+        noise_patterns=[
+            r'(?i)^(dear\s+(students?|members?|traders?)|class\s+|session\s+|lecture)',
+            r'(?i)(gurukul|workshop|webinar|seminar|course|enroll)',
+        ],
+        min_message_length=10,
+    ))
+    signal_combiner.add_channel_rules("-1001389090145", ChannelSpecificRules(
+        channel_name="Stockpro Online",
+        always_single_message=True,
+        noise_patterns=[
+            r'(?i)(visit\s+(our|www)|stockpro|free\s+trial|accuracy\s+\d+%)',
+            r'(?i)^(follow\s+us|share\s+with|forward\s+this)',
+        ],
+        min_message_length=10,
+    ))
+    signal_combiner.add_channel_rules("-1002431924245", ChannelSpecificRules(
+        channel_name="MCX JACKPOT TRADING",
+        always_single_message=True,
+        noise_patterns=[
+            r'(?i)(jackpot|bumper\s+profit|100%\s+sure|guaranteed)',
+            r'(?i)^(profit\s+booking|booked\s+profit|see\s+our\s+result)',
+        ],
+        min_message_length=10,
+    ))
+    signal_combiner.add_channel_rules("-1001294857397", ChannelSpecificRules(
+        channel_name="Mcx Trading King Official Group",
+        always_single_message=True,
+        noise_patterns=[
+            r'(?i)(trading\s+king|king\s+of\s+mcx|join\s+paid|premium\s+member)',
+            r'(?i)^(profit\s+earned|today.s\s+result|check\s+screenshot)',
+        ],
+        min_message_length=10,
+    ))
+
+    logging.info("[OK] Channel rules configured for all channels")
 else:
     logging.info("[INFO] Multi-message combining disabled (module not found)")
 
