@@ -309,8 +309,9 @@ class MultiMessageSignalCombiner:
         channel_id = str(channel_id)
         self.stats['messages_processed'] += 1
 
-        # Always pass channel_id to the parser so it can apply channel-specific logic
-        parser_kwargs.setdefault('channel_id', channel_id)
+        # Store channel_id separately for parser calls (avoid passing it twice
+        # to internal methods that also take channel_id as a positional arg)
+        self._current_parser_kwargs = dict(parser_kwargs, channel_id=channel_id)
 
         rules = self.get_channel_rules(channel_id)
 
@@ -327,7 +328,7 @@ class MultiMessageSignalCombiner:
             )
 
         # --- Step 2: Try single-message parse ---
-        parsed = self.parser.parse(message_text, **parser_kwargs)
+        parsed = self.parser.parse(message_text, **self._current_parser_kwargs)
 
         if self._is_complete_signal(parsed):
             # Complete signal from a single message — return immediately
@@ -385,7 +386,7 @@ class MultiMessageSignalCombiner:
         self._add_to_buffer(channel_id, buffered_msg)
 
         # --- Step 6: Try combining all buffered messages ---
-        combine_result = self._try_combine(channel_id, **parser_kwargs)
+        combine_result = self._try_combine(channel_id)
         if combine_result and self._is_complete_signal(combine_result.parsed_data):
             self.stats['combined_signals'] += 1
             self.stats['messages_combined_total'] += len(combine_result.source_message_ids)
@@ -397,7 +398,7 @@ class MultiMessageSignalCombiner:
             return combine_result
 
         # --- Step 7: Schedule flush timer ---
-        self._schedule_flush(channel_id, **parser_kwargs)
+        self._schedule_flush(channel_id)
 
         # Message buffered, no complete signal yet
         logger.info(
@@ -437,7 +438,7 @@ class MultiMessageSignalCombiner:
         self._buffers.pop(channel_id, None)
         self._cancel_flush(channel_id)
 
-    def _try_combine(self, channel_id: str, **parser_kwargs) -> Optional[CombineResult]:
+    def _try_combine(self, channel_id: str) -> Optional[CombineResult]:
         """Try combining all buffered messages for a channel into a signal.
 
         Tries combining messages in order (2, 3, ... up to all buffered).
@@ -446,6 +447,8 @@ class MultiMessageSignalCombiner:
         buf = self._buffers.get(channel_id, [])
         if len(buf) < 2:
             return None
+
+        pk = getattr(self, '_current_parser_kwargs', {'channel_id': channel_id})
 
         # Try combining from most recent backwards (prioritize newest messages)
         # Also try combining all messages
@@ -464,7 +467,7 @@ class MultiMessageSignalCombiner:
             combined_text = "\n".join(m.text for m in combo)
             msg_ids = [m.message_id for m in combo]
 
-            parsed = self.parser.parse(combined_text, **parser_kwargs)
+            parsed = self.parser.parse(combined_text, **pk)
 
             if self._is_complete_signal(parsed):
                 return CombineResult(
@@ -493,14 +496,14 @@ class MultiMessageSignalCombiner:
         """
         self._flush_callback = callback
 
-    def _schedule_flush(self, channel_id: str, **parser_kwargs):
+    def _schedule_flush(self, channel_id: str):
         """Schedule (or reschedule) a flush for the channel buffer."""
         self._cancel_flush(channel_id)
         window = self._get_window(channel_id)
 
         async def _flush():
             await asyncio.sleep(window)
-            self._do_flush(channel_id, **parser_kwargs)
+            self._do_flush(channel_id)
 
         try:
             loop = asyncio.get_event_loop()
@@ -518,16 +521,17 @@ class MultiMessageSignalCombiner:
         if task and not task.done():
             task.cancel()
 
-    def _do_flush(self, channel_id: str, **parser_kwargs):
+    def _do_flush(self, channel_id: str):
         """Flush handler: try final combine, then clear buffer."""
         buf = self._buffers.get(channel_id, [])
         if not buf:
             return
 
         self.stats['buffer_expires'] += 1
+        pk = getattr(self, '_current_parser_kwargs', {'channel_id': channel_id})
 
         # Try one last combine
-        result = self._try_combine(channel_id, **parser_kwargs)
+        result = self._try_combine(channel_id)
         if result and self._is_complete_signal(result.parsed_data):
             self.stats['combined_signals'] += 1
             self.stats['messages_combined_total'] += len(result.source_message_ids)
@@ -541,7 +545,7 @@ class MultiMessageSignalCombiner:
             # Try parsing each buffered message individually as a last resort
             # (it may have been a partial signal that's good enough)
             for msg in buf:
-                parsed = self.parser.parse(msg.text, **parser_kwargs)
+                parsed = self.parser.parse(msg.text, **pk)
                 if parsed:
                     individual_result = CombineResult(
                         parsed_data=parsed,
@@ -577,10 +581,10 @@ class MultiMessageSignalCombiner:
         """Get combiner statistics."""
         return dict(self.stats)
 
-    def flush_all(self, **parser_kwargs):
+    def flush_all(self):
         """Flush all channel buffers immediately (e.g., on shutdown)."""
         for channel_id in list(self._buffers.keys()):
-            self._do_flush(channel_id, **parser_kwargs)
+            self._do_flush(channel_id)
 
     def log_stats(self):
         """Log current combiner statistics."""
