@@ -1,11 +1,14 @@
 """
 telegram_reader_production.py - ENHANCED VERSION
 WITH FUTURES SUPPORT + EXPIRY DATE DISPLAY + TIMESTAMPED LOGS
++ MULTI-MESSAGE SIGNAL COMBINING + NOISE FILTERING
 
 Features:
 - Graceful shutdown on SIGTERM/SIGINT
 - Rate limiting to prevent API bans
 - Explicit timezone handling (IST)
+- Multi-message signal combining for split signals (any channel)
+- Noise filtering for non-trading messages
 """
 
 import asyncio
@@ -107,6 +110,13 @@ except ImportError:
         print("ERROR: Parser not found!")
         exit(1)
 
+# Import multi-message signal combiner
+try:
+    from multi_message_signal_combiner import MultiMessageSignalCombiner, ChannelSpecificRules
+    MULTI_MESSAGE_SUPPORT = True
+except ImportError:
+    MULTI_MESSAGE_SUPPORT = False
+
 # Configure logging with timestamped filename
 logging.basicConfig(
     level=logging.INFO,
@@ -122,6 +132,9 @@ logging.basicConfig(
 
 # Log the filename being used
 logging.info(f"[LOG] Writing to: {log_filename}")
+
+if not MULTI_MESSAGE_SUPPORT:
+    logging.warning("[WARNING] multi_message_signal_combiner not found - multi-message combining disabled")
 
 # Load Claude API key
 try:
@@ -159,7 +172,7 @@ original_parse = parser.parse
 def patched_parse(message, **kwargs):
     """Wrapper that fixes tradingsymbol format after parsing"""
     result = original_parse(message, **kwargs)
-    
+
     if result and 'tradingsymbol' in result:
         # Regenerate tradingsymbol with correct format for OPTIONS
         if 'strike' in result and result.get('instrument_type', 'OPTIONS') == 'OPTIONS':
@@ -171,11 +184,11 @@ def patched_parse(message, **kwargs):
                     expiry_date=result['expiry_date']
                 )
                 if correct_ts != result['tradingsymbol']:
-                    logging.info(f"[FIX] Corrected: {result['tradingsymbol']} → {correct_ts}")
+                    logging.info(f"[FIX] Corrected: {result['tradingsymbol']} -> {correct_ts}")
                     result['tradingsymbol'] = correct_ts
             except Exception as e:
                 logging.warning(f"[WARN] Could not fix tradingsymbol: {e}")
-    
+
     return result
 
 parser.parse = patched_parse
@@ -187,6 +200,47 @@ if FUTURES_SUPPORT:
 else:
     logging.info(f"[OK] Using legacy parser (OPTIONS only)")
 
+# ========================================
+# MULTI-MESSAGE SIGNAL COMBINER SETUP
+# ========================================
+signal_combiner = None
+
+if MULTI_MESSAGE_SUPPORT:
+    signal_combiner = MultiMessageSignalCombiner(
+        parser=parser,
+        combination_window_seconds=30,
+        max_messages_to_combine=5,
+    )
+    logging.info("[OK] Multi-message signal combiner initialized (window=30s, max=5)")
+
+    # ---- Channel-specific rules ----
+    # Configure per-channel combining behaviour below.
+    # Set always_single_message=True for channels that always send complete signals.
+    # Adjust combination_window_seconds for channels with slower/faster multi-part signals.
+    #
+    # Example (uncomment and set your channel IDs):
+    #
+    # signal_combiner.add_channel_rules("-1002498088029", ChannelSpecificRules(
+    #     channel_name="RJ - STUDENT PRACTICE CALLS",
+    #     combination_window_seconds=20,
+    #     max_messages_to_combine=3,
+    # ))
+    #
+    # signal_combiner.add_channel_rules("-1003089362819", ChannelSpecificRules(
+    #     channel_name="Paid Premium group",
+    #     always_single_message=True,  # This channel sends complete signals
+    # ))
+    #
+    # signal_combiner.add_channel_rules("-1002770917134", ChannelSpecificRules(
+    #     channel_name="MCX PREMIUM",
+    #     combination_window_seconds=45,  # MCX signals sometimes arrive slower
+    #     noise_patterns=[r'(?i)^(market\s+update|news)'],
+    # ))
+
+    logging.info("[OK] Channel rules configured (edit telegram_reader_production.py to customize)")
+else:
+    logging.info("[INFO] Multi-message combining disabled (module not found)")
+
 # Statistics
 stats = {
     'total_messages': 0,
@@ -194,7 +248,9 @@ stats = {
     'stored_signals': 0,
     'parsing_failures': 0,
     'options_signals': 0,
-    'futures_signals': 0
+    'futures_signals': 0,
+    'noise_filtered': 0,
+    'combined_signals': 0,
 }
 
 # ========================================
@@ -246,6 +302,12 @@ def request_shutdown(signum=None, frame=None):
     _shutdown_requested = True
     sig_name = signal.Signals(signum).name if signum else "UNKNOWN"
     logging.info(f"\n[SHUTDOWN] Received {sig_name}, shutting down gracefully...")
+
+    # Flush any pending multi-message buffers before shutting down
+    if signal_combiner:
+        logging.info("[SHUTDOWN] Flushing multi-message buffers...")
+        signal_combiner.flush_all()
+
     print_stats()
 
     # Try to set asyncio event if available
@@ -286,7 +348,7 @@ def get_expiry_dates_from_csv():
     try:
         import pandas as pd
         from datetime import datetime
-        
+
         # Try to load CSV or Parquet
         try:
             df = pd.read_parquet('valid_instruments.parquet')
@@ -298,40 +360,40 @@ def get_expiry_dates_from_csv():
             except (FileNotFoundError, IOError, pd.errors.EmptyDataError) as csv_err:
                 logging.warning(f"[EXPIRY] Could not load instruments file: {csv_err}")
                 return None
-        
+
         # Get current month
         current_month = datetime.now().month
         current_year = datetime.now().year
-        
+
         # Symbols to check
         symbols_to_check = ['NIFTY', 'SENSEX', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
-        
+
         expiry_info = {}
-        
+
         for symbol in symbols_to_check:
             # Find instruments for this symbol
             symbol_instruments = df[df['symbol'].str.contains(symbol, case=False, na=False)].copy()
-            
+
             if len(symbol_instruments) > 0:
                 # Convert expiry_date to datetime
                 symbol_instruments['expiry_dt'] = pd.to_datetime(symbol_instruments['expiry_date'])
-                
+
                 # Filter for current month
                 current_month_expiries = symbol_instruments[
                     (symbol_instruments['expiry_dt'].dt.month == current_month) &
                     (symbol_instruments['expiry_dt'].dt.year == current_year)
                 ]
-                
+
                 # Get unique expiry dates
                 unique_expiries = sorted(current_month_expiries['expiry_dt'].unique())
-                
+
                 if len(unique_expiries) > 0:
                     # Convert to string dates
                     expiry_dates = [dt.strftime('%Y-%m-%d (%A)') for dt in unique_expiries]
                     expiry_info[symbol] = expiry_dates
-        
+
         return expiry_info
-        
+
     except Exception as e:
         logging.error(f"[EXPIRY] Error extracting expiry dates: {e}")
         import traceback
@@ -343,43 +405,43 @@ def display_expiry_info():
     """Display expiry dates for major indices"""
     logging.info("")
     logging.info("="*80)
-    logging.info("📅 CURRENT MONTH EXPIRY DATES")
+    logging.info("CURRENT MONTH EXPIRY DATES")
     logging.info("="*80)
-    
+
     expiry_info = get_expiry_dates_from_csv()
-    
+
     if expiry_info:
         current_month_name = datetime.now().strftime('%B %Y')
         logging.info(f"Month: {current_month_name}")
         logging.info("")
-        
+
         # Display NIFTY and SENSEX first
         for symbol in ['NIFTY', 'SENSEX']:
             if symbol in expiry_info:
                 logging.info(f"{symbol}:")
                 for expiry in expiry_info[symbol]:
-                    logging.info(f"  ✓ {expiry}")
+                    logging.info(f"  > {expiry}")
                 logging.info("")
-        
+
         # Display BANKNIFTY, FINNIFTY, MIDCPNIFTY
         for symbol in ['BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']:
             if symbol in expiry_info:
                 logging.info(f"{symbol}:")
                 for expiry in expiry_info[symbol]:
-                    logging.info(f"  ✓ {expiry}")
+                    logging.info(f"  > {expiry}")
                 logging.info("")
-        
+
         # Display any other symbols found
-        other_symbols = [s for s in expiry_info.keys() 
+        other_symbols = [s for s in expiry_info.keys()
                         if s not in ['NIFTY', 'SENSEX', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']]
         for symbol in other_symbols:
             logging.info(f"{symbol}:")
             for expiry in expiry_info[symbol]:
-                logging.info(f"  ✓ {expiry}")
+                logging.info(f"  > {expiry}")
             logging.info("")
     else:
         logging.warning("Could not load expiry information from CSV/Parquet")
-    
+
     logging.info("="*80)
     logging.info("")
 
@@ -409,20 +471,112 @@ def insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data):
             else:
                 stats['options_signals'] += 1
 
-            logging.info(f"[✓ STORED] Signal ID: {signal_id} | Type: {instrument_type}")
+            logging.info(f"[STORED] Signal ID: {signal_id} | Type: {instrument_type}")
             return signal_id
         else:
             logging.info(f"[SKIP] Duplicate message (Channel: {channel_name}, Msg ID: {message_id})")
             return None
 
     except Exception as e:
-        logging.error(f"[✗ DB ERROR] {e}")
+        logging.error(f"[DB ERROR] {e}")
         return None
 
 
+# ========================================
+# SIGNAL PROCESSING HELPERS
+# ========================================
+
+def _log_and_store_signal(parsed_data, channel_id, channel_name, message_id,
+                          raw_text, was_combined=False, source_ids=None):
+    """Log a parsed signal and insert it into the database.
+
+    Shared logic used by both the single-message path and the combiner callback.
+    """
+    stats['parsed_signals'] += 1
+    if was_combined:
+        stats['combined_signals'] += 1
+
+    instrument_type = parsed_data.get('instrument_type', 'OPTIONS')
+
+    # Validate required fields
+    if instrument_type == 'FUTURES':
+        required_fields = ['symbol', 'action', 'entry_price', 'stop_loss',
+                         'expiry_date', 'quantity', 'instrument_type']
+    else:
+        required_fields = ['symbol', 'strike', 'option_type', 'action',
+                         'entry_price', 'stop_loss', 'expiry_date', 'quantity']
+
+    missing = [f for f in required_fields if f not in parsed_data or parsed_data[f] is None]
+
+    if missing:
+        logging.warning(f"[INCOMPLETE] Missing fields: {missing}")
+        logging.warning(f"   Message: {raw_text[:100]}")
+    else:
+        logging.info(f"[COMPLETE] All required fields present")
+
+    if was_combined and source_ids:
+        logging.info(f"[COMBINED] Signal from {len(source_ids)} messages: {source_ids}")
+
+    # Log based on type
+    if instrument_type == 'FUTURES':
+        logging.info(f"[PARSED FUTURES] {parsed_data.get('symbol')} "
+                   f"{parsed_data.get('expiry_month', 'FUT')}")
+        logging.info(f"   Action: {parsed_data.get('action')} | "
+                   f"Entry: {parsed_data.get('entry_price')} | "
+                   f"SL: {parsed_data.get('stop_loss')}")
+        logging.info(f"   Expiry: {parsed_data.get('expiry_date')} | "
+                   f"Qty: {parsed_data.get('quantity')}")
+    else:
+        logging.info(f"[PARSED OPTIONS] {parsed_data.get('symbol')} "
+                   f"{parsed_data.get('strike')} {parsed_data.get('option_type')}")
+        logging.info(f"   Action: {parsed_data.get('action')} | "
+                   f"Entry: {parsed_data.get('entry_price')} | "
+                   f"SL: {parsed_data.get('stop_loss')}")
+        logging.info(f"   Expiry: {parsed_data.get('expiry_date')} | "
+                   f"Qty: {parsed_data.get('quantity')}")
+
+    insert_signal(channel_id, channel_name, message_id, raw_text, parsed_data)
+
+
+# ========================================
+# COMBINER FLUSH CALLBACK
+# ========================================
+# Cache channel names so the flush callback (which fires on a timer) can log them
+_channel_name_cache = {}
+
+
+def _combiner_flush_callback(channel_id, combine_result):
+    """Called when the combiner's timer fires and produces a signal from buffered messages."""
+    if combine_result.parsed_data:
+        channel_name = _channel_name_cache.get(channel_id, channel_id)
+        msg_ids = combine_result.source_message_ids
+        logging.info("")
+        logging.info("=" * 60)
+        logging.info(f"[FLUSH-COMBINE] Delayed signal from channel {channel_name}")
+        logging.info(f"[TIME] {format_ist_timestamp()}")
+        logging.info("=" * 60)
+        _log_and_store_signal(
+            parsed_data=combine_result.parsed_data,
+            channel_id=channel_id,
+            channel_name=channel_name,
+            message_id=msg_ids[-1] if msg_ids else 0,
+            raw_text=combine_result.combined_text,
+            was_combined=combine_result.was_combined,
+            source_ids=msg_ids,
+        )
+
+
+# Register flush callback if combiner is available
+if signal_combiner:
+    signal_combiner.set_flush_callback(_combiner_flush_callback)
+
+
+# ========================================
+# MESSAGE HANDLER
+# ========================================
+
 async def handle_message(event):
-    """Handle incoming Telegram messages with rate limiting"""
-    # Check for shutdown
+    """Handle incoming Telegram messages with rate limiting and multi-message combining."""
     if _shutdown_requested:
         return
 
@@ -436,8 +590,11 @@ async def handle_message(event):
 
         channel = await event.get_chat()
         channel_id = str(event.chat_id)
-        channel_name = channel.title if hasattr(channel, 'title') else str(channel_id)
+        channel_name = channel.title if hasattr(channel, 'title') else channel_id
         message_id = event.message.id
+
+        # Cache channel name for flush callback
+        _channel_name_cache[channel_id] = channel_name
 
         stats['total_messages'] += 1
 
@@ -446,59 +603,61 @@ async def handle_message(event):
         logging.info("="*60)
         logging.info(f"[NEW] Message from: {channel_name} (ID: {channel_id})")
         logging.info(f"[TIME] {format_ist_timestamp()}")
-        preview = message_text[:50].replace('\n', ' ') + '...' if len(message_text) > 50 else message_text
+        preview = message_text[:80].replace('\n', ' ')
+        if len(message_text) > 80:
+            preview += '...'
         logging.info(f"[PREVIEW] {preview}")
         logging.info("="*60)
-        
-        # Parse the message (handles both OPTIONS and FUTURES)
+
+        # ---- Multi-message combiner path ----
+        if signal_combiner:
+            result = await signal_combiner.process_message(
+                channel_id=channel_id,
+                message_text=message_text,
+                message_id=message_id,
+            )
+
+            if result is None:
+                # Message buffered, waiting for more
+                logging.info(f"[BUFFERED] Waiting for follow-up messages...")
+                return
+
+            if result.was_noise:
+                stats['noise_filtered'] += 1
+                stats['parsing_failures'] += 1
+                logging.info(f"[NOISE] Filtered non-trading message")
+                return
+
+            if result.parsed_data:
+                _log_and_store_signal(
+                    parsed_data=result.parsed_data,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    message_id=message_id,
+                    raw_text=result.combined_text,
+                    was_combined=result.was_combined,
+                    source_ids=result.source_message_ids,
+                )
+            else:
+                stats['parsing_failures'] += 1
+                logging.info(f"[SKIP] Not a trading signal")
+            return
+
+        # ---- Fallback: original single-message path (if combiner not available) ----
         parsed_data = parser.parse(message_text, channel_id=channel_id)
-        
+
         if parsed_data:
-            stats['parsed_signals'] += 1
-            
-            # Get instrument type
-            instrument_type = parsed_data.get('instrument_type', 'OPTIONS')
-            
-            # Validate required fields based on type
-            if instrument_type == 'FUTURES':
-                required_fields = ['symbol', 'action', 'entry_price', 'stop_loss', 
-                                 'expiry_date', 'quantity', 'instrument_type']
-            else:
-                required_fields = ['symbol', 'strike', 'option_type', 'action', 
-                                 'entry_price', 'stop_loss', 'expiry_date', 'quantity']
-            
-            missing = [f for f in required_fields if f not in parsed_data or parsed_data[f] is None]
-            
-            if missing:
-                logging.warning(f"[⚠️ INCOMPLETE] Missing fields: {missing}")
-                logging.warning(f"   Message: {message_text[:100]}")
-            else:
-                logging.info(f"[✓ COMPLETE] All required fields present")
-            
-            # Log based on type
-            if instrument_type == 'FUTURES':
-                logging.info(f"[✓ PARSED FUTURES] {parsed_data.get('symbol')} "
-                           f"{parsed_data.get('expiry_month', 'FUT')}")
-                logging.info(f"   Action: {parsed_data.get('action')} | "
-                           f"Entry: {parsed_data.get('entry_price')} | "
-                           f"SL: {parsed_data.get('stop_loss')}")
-                logging.info(f"   Expiry: {parsed_data.get('expiry_date')} | "
-                           f"Qty: {parsed_data.get('quantity')}")
-            else:
-                logging.info(f"[✓ PARSED OPTIONS] {parsed_data.get('symbol')} "
-                           f"{parsed_data.get('strike')} {parsed_data.get('option_type')}")
-                logging.info(f"   Action: {parsed_data.get('action')} | "
-                           f"Entry: {parsed_data.get('entry_price')} | "
-                           f"SL: {parsed_data.get('stop_loss')}")
-                logging.info(f"   Expiry: {parsed_data.get('expiry_date')} | "
-                           f"Qty: {parsed_data.get('quantity')}")
-            
-            # Insert into database
-            insert_signal(channel_id, channel_name, message_id, message_text, parsed_data)
+            _log_and_store_signal(
+                parsed_data=parsed_data,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                message_id=message_id,
+                raw_text=message_text,
+            )
         else:
             stats['parsing_failures'] += 1
-            logging.info(f"[✗ SKIP] Not a trading signal")
-            
+            logging.info(f"[SKIP] Not a trading signal")
+
     except Exception as e:
         logging.error(f"[ERROR] Error handling message: {e}")
         import traceback
@@ -508,21 +667,21 @@ async def handle_message(event):
 async def main():
     """Main function"""
     await client.start(TELEGRAM_PHONE)
-    
+
     # Get user info
     me = await client.get_me()
     logging.info(f"[OK] Connected to Telegram as {me.phone}")
-    
+
     # Display expiry information BEFORE starting monitoring
     display_expiry_info()
-    
+
     # Get channel entities and FORCE CATCH-UP for each
     channel_entities = []
     for channel_id in MONITORED_CHANNELS:
         try:
             entity = await client.get_entity(channel_id)
             channel_entities.append(entity)
-            
+
             # IMPORTANT: Fetch recent messages to "wake up" the channel
             # This forces Telegram to send us new messages from this channel
             try:
@@ -530,17 +689,21 @@ async def main():
                 logging.info(f"[OK] Monitoring: {entity.title} (synced)")
             except Exception as sync_err:
                 logging.info(f"[OK] Monitoring: {entity.title} (sync skipped: {type(sync_err).__name__})")
-                
+
         except Exception as e:
             logging.error(f"[ERROR] Failed to get channel {channel_id}: {e}")
-    
+
     logging.info("="*80)
     logging.info(f"[START] Monitoring {len(channel_entities)} channels")
     logging.info(f"[MODE] {PARSER_TYPE} - {'OPTIONS + FUTURES' if FUTURES_SUPPORT else 'OPTIONS only'}")
+    if signal_combiner:
+        logging.info(f"[COMBINE] Multi-message combining enabled (window=30s, max=5)")
+    else:
+        logging.info(f"[COMBINE] Multi-message combining disabled")
     logging.info(f"[LOG] Output: {log_filename}")
     logging.info("Press Ctrl+C to stop")
     logging.info("="*80)
-    
+
     # Register event handler for ALL entities
     @client.on(events.NewMessage(chats=channel_entities))
     async def handler(event):
@@ -551,18 +714,24 @@ async def main():
 
 
 def print_stats():
-    """Print statistics"""
+    """Print statistics including combiner stats"""
     logging.info("")
     logging.info("="*80)
     logging.info("STATISTICS")
     logging.info("="*80)
     logging.info(f"Total Messages:     {stats['total_messages']}")
+    logging.info(f"Noise Filtered:     {stats['noise_filtered']}")
     logging.info(f"Parsed Signals:     {stats['parsed_signals']}")
     logging.info(f"  - Options:        {stats['options_signals']}")
     logging.info(f"  - Futures:        {stats['futures_signals']}")
+    logging.info(f"  - Combined:       {stats['combined_signals']}")
     logging.info(f"Stored Signals:     {stats['stored_signals']}")
     logging.info(f"Parse Failures:     {stats['parsing_failures']}")
     logging.info("="*80)
+
+    # Print combiner-specific stats if available
+    if signal_combiner:
+        signal_combiner.log_stats()
 
 
 if __name__ == '__main__':
