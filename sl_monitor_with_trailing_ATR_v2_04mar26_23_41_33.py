@@ -38,7 +38,7 @@ from pathlib import Path
 master_lib = r"C:\Users\meetm\OneDrive\Desktop\GCPPythonCode\MasterConfiguration\lib"
 if master_lib not in sys.path:
     sys.path.append(master_lib)
-from master_resource import MasterResource, get_sl_config_path, get_sl_exits_path
+from master_resource import MasterResource
 
 # Configure logging with centralized Master Hub directory
 log_ts = datetime.now().strftime('%d%b%Y_%H_%M_%S').upper()
@@ -214,22 +214,21 @@ class EnhancedSLMonitor:
         }
         
         try:
-            sl_config_path = get_sl_config_path()
-            if os.path.exists(sl_config_path):
-                with open(sl_config_path, 'r') as f:
+            if os.path.exists('sl_config.json'):
+                with open('sl_config.json', 'r') as f:
                     user_config = json.load(f)
                     # Merge with defaults (user config overrides)
                     self.sl_config = {**default_config, **user_config}
                     # Update ATR multiplier from user config
                     if 'atr_multiplier' in user_config:
                         self.atr_multiplier = user_config['atr_multiplier']
-                    logging.info(f"[INIT] Loaded custom SL config from {sl_config_path}")
+                    logging.info(f"[INIT] Loaded custom SL config from sl_config.json")
             else:
                 self.sl_config = default_config
                 # Save default config for user to edit
-                with open(sl_config_path, 'w') as f:
+                with open('sl_config.json', 'w') as f:
                     json.dump(default_config, f, indent=2)
-                logging.info(f"[INIT] Created default sl_config.json at {sl_config_path} - customize as needed!")
+                logging.info(f"[INIT] Created default sl_config.json - customize as needed!")
         except Exception as e:
             logging.warning(f"[INIT] Could not load sl_config.json: {e}, using defaults")
             self.sl_config = default_config
@@ -237,14 +236,13 @@ class EnhancedSLMonitor:
     def _load_sl_exits(self):
         """Load SL exits from file to persist across restarts"""
         try:
-            sl_exits_path = get_sl_exits_path()
-            if os.path.exists(sl_exits_path):
-                with open(sl_exits_path, 'r') as f:
+            if os.path.exists('sl_exits.json'):
+                with open('sl_exits.json', 'r') as f:
                     data = json.load(f)
                     today = date.today().isoformat()
                     # Only keep today's exits
                     self.sl_exits_today = {k: v for k, v in data.items() if v == today}
-
+                    
                     if self.sl_exits_today:
                         logging.info(f"[INIT] Loaded {len(self.sl_exits_today)} SL exits from today")
                         for symbol in self.sl_exits_today:
@@ -264,9 +262,8 @@ class EnhancedSLMonitor:
         blacklisted at 11:24 but re-entered at 20:19).
         """
         try:
-            sl_exits_path = get_sl_exits_path()
-            if os.path.exists(sl_exits_path):
-                with open(sl_exits_path, 'r') as f:
+            if os.path.exists('sl_exits.json'):
+                with open('sl_exits.json', 'r') as f:
                     data = json.load(f)
                     today = date.today().isoformat()
                     fresh = {k: v for k, v in data.items() if v == today}
@@ -280,7 +277,7 @@ class EnhancedSLMonitor:
     def _save_sl_exits(self):
         """Save SL exits to file"""
         try:
-            with open(get_sl_exits_path(), 'w') as f:
+            with open('sl_exits.json', 'w') as f:
                 json.dump(self.sl_exits_today, f, indent=2)
         except Exception as e:
             logging.warning(f"[WARN] Could not save sl_exits: {e}")

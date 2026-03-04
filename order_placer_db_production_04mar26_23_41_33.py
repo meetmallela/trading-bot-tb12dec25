@@ -21,7 +21,7 @@ from pathlib import Path
 master_lib = r"C:\Users\meetm\OneDrive\Desktop\GCPPythonCode\MasterConfiguration\lib"
 if master_lib not in sys.path:
     sys.path.append(master_lib)
-from master_resource import MasterResource, get_sl_exits_path
+from master_resource import MasterResource
 
 # Configure logging with centralized Master Hub directory
 log_ts = datetime.now().strftime('%d%b%Y_%H_%M_%S').upper()
@@ -138,18 +138,18 @@ class OrderPlacerProduction:
         try:
             import os
             from datetime import date
-            sl_exits_path = get_sl_exits_path()
-            if os.path.exists(sl_exits_path):
-                with open(sl_exits_path, 'r') as f:
+            
+            if os.path.exists('sl_exits.json'):
+                with open('sl_exits.json', 'r') as f:
                     data = json.load(f)
                     today = date.today().isoformat()
-
+                    
                     # Only keep today's exits
                     self.sl_exits_today = {
-                        k: v for k, v in data.items()
+                        k: v for k, v in data.items() 
                         if v == today
                     }
-
+                    
                     if self.sl_exits_today:
                         logging.info(f"[INIT] Loaded {len(self.sl_exits_today)} blacklisted instruments (SL exits)")
         except Exception as e:
@@ -160,9 +160,8 @@ class OrderPlacerProduction:
         try:
             import os
             from datetime import date
-            sl_exits_path = get_sl_exits_path()
-            if os.path.exists(sl_exits_path):
-                with open(sl_exits_path, 'r') as f:
+            if os.path.exists('sl_exits.json'):
+                with open('sl_exits.json', 'r') as f:
                     data = json.load(f)
                     today = date.today().isoformat()
                     self.sl_exits_today = {k: v for k, v in data.items() if v == today}
