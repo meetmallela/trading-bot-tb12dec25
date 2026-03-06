@@ -29,7 +29,7 @@ import signal
 import sys
 import requests
 import pandas as pd
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone, time as dtime
 from kiteconnect import KiteConnect
 
 # 0. Add Master Hub to path for configuration and logging
@@ -337,6 +337,20 @@ class EnhancedSLMonitor:
         """Get current time in IST"""
         return datetime.now(self.ist)
 
+    def get_order_variety(self, exchange):
+        """Return VARIETY_REGULAR if exchange is currently open, else VARIETY_AMO.
+        NSE/NFO/BFO: 09:15–15:30 IST | MCX: 09:00–23:55 IST
+        """
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(IST).time()
+        if exchange == 'MCX':
+            is_open = dtime(9, 0) <= now <= dtime(23, 55)
+        else:  # NSE, NFO, BFO
+            is_open = dtime(9, 15) <= now <= dtime(15, 30)
+        variety = self.kite.VARIETY_REGULAR if is_open else self.kite.VARIETY_AMO
+        logging.info(f"[VARIETY] Exchange: {exchange} | Market open: {is_open} | Variety: {'REGULAR' if is_open else 'AMO'}")
+        return variety
+
     def is_forced_exit_time(self, pos):
         """Check if segment-specific square-off time has passed.
 
@@ -418,7 +432,7 @@ class EnhancedSLMonitor:
 
             if not self.test_mode:
                 order_id = self.kite.place_order(
-                    variety=self.kite.VARIETY_REGULAR,
+                    variety=self.get_order_variety(pos['exchange']),
                     exchange=pos['exchange'],
                     tradingsymbol=symbol,
                     transaction_type=self.kite.TRANSACTION_TYPE_SELL if pos['quantity'] > 0 else self.kite.TRANSACTION_TYPE_BUY,
@@ -792,7 +806,7 @@ class EnhancedSLMonitor:
 
             if not self.test_mode:
                 order_id = self.kite.place_order(
-                    variety=self.kite.VARIETY_REGULAR,
+                    variety=self.get_order_variety(exchange),
                     exchange=exchange,
                     tradingsymbol=tradingsymbol,
                     transaction_type=transaction_type,

@@ -478,7 +478,7 @@ class OrderPlacerProduction:
             tag = "BOT:TG"  # Fallback to generic tag
             logging.warning(f"[TAG] Channel name too long, using generic tag: {tag}")
         else:
-            logging.debug(f"[TAG] Generated tag: {tag} (length: {len(tag)})")
+            logging.info(f"[TAG-GEN] Generated tag: {repr(tag)} (len={len(tag)}, bytes={len(tag.encode('utf-8'))})")
         
         return tag
     
