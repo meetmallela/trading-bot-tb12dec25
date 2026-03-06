@@ -208,9 +208,10 @@ class EnhancedSLMonitor:
             "atr_lookback_hours": 2,     # Hours of historical data
             "atr_cache_minutes": 5,      # Cache ATR for N minutes
             "commodities": [             # List of commodity keywords
-                "CRUDE", "CRUDEOIL", "GOLD", "SILVER", "COPPER", 
+                "CRUDE", "CRUDEOIL", "GOLD", "SILVER", "COPPER",
                 "ZINC", "NICKEL", "LEAD", "ALUMINIUM", "NATURALGAS"
-            ]
+            ],
+            "reentry_cooldown_minutes": 30  # Minutes to block re-entry after SL hit (0 = all day)
         }
         
         try:
@@ -242,9 +243,11 @@ class EnhancedSLMonitor:
                 with open(sl_exits_path, 'r') as f:
                     data = json.load(f)
                     today = date.today().isoformat()
-                    # Only keep today's exits
-                    self.sl_exits_today = {k: v for k, v in data.items() if v == today}
-
+                    # Keep today's exits; handle both old str format and new dict format
+                    self.sl_exits_today = {
+                        k: v for k, v in data.items()
+                        if (v == today if isinstance(v, str) else v.get('date') == today)
+                    }
                     if self.sl_exits_today:
                         logging.info(f"[INIT] Loaded {len(self.sl_exits_today)} SL exits from today")
                         for symbol in self.sl_exits_today:
@@ -269,7 +272,10 @@ class EnhancedSLMonitor:
                 with open(sl_exits_path, 'r') as f:
                     data = json.load(f)
                     today = date.today().isoformat()
-                    fresh = {k: v for k, v in data.items() if v == today}
+                    fresh = {
+                        k: v for k, v in data.items()
+                        if (v == today if isinstance(v, str) else v.get('date') == today)
+                    }
                     new_entries = set(fresh.keys()) - set(self.sl_exits_today.keys())
                     if new_entries:
                         logging.info(f"[BLACKLIST-REFRESH] {len(new_entries)} new SL exits loaded: {new_entries}")
@@ -286,17 +292,42 @@ class EnhancedSLMonitor:
             logging.warning(f"[WARN] Could not save sl_exits: {e}")
 
     def record_sl_exit(self, tradingsymbol):
-        """Record hit SL - block re-entry for rest of day"""
+        """Record SL hit with timestamp so cooldown-based re-entry can be checked."""
         today = date.today().isoformat()
-        self.sl_exits_today[tradingsymbol] = today
+        self.sl_exits_today[tradingsymbol] = {
+            "date": today,
+            "sl_time": datetime.now().isoformat(timespec='seconds')
+        }
         self._save_sl_exits()
-        logging.warning(f"[BLACKLIST] {tradingsymbol} hit SL - NO RE-ENTRY allowed today")
+        cooldown = self.sl_config.get('reentry_cooldown_minutes', 30)
+        logging.warning(f"[BLACKLIST] {tradingsymbol} hit SL - re-entry blocked for {cooldown} min")
 
     def is_blocked_from_reentry(self, tradingsymbol):
-        """Check if instrument is blocked from re-entry"""
-        if tradingsymbol in self.sl_exits_today:
-            return self.sl_exits_today[tradingsymbol] == date.today().isoformat()
-        return False
+        """Check if instrument is still within the re-entry cooldown window after an SL hit."""
+        if tradingsymbol not in self.sl_exits_today:
+            return False
+
+        entry = self.sl_exits_today[tradingsymbol]
+        today = date.today().isoformat()
+        cooldown = self.sl_config.get('reentry_cooldown_minutes', 30)
+
+        # Parse both old format (plain date string) and new format (dict with sl_time)
+        if isinstance(entry, str):
+            date_iso, sl_time_str = entry, None
+        else:
+            date_iso, sl_time_str = entry.get('date'), entry.get('sl_time')
+
+        if date_iso != today:
+            return False  # Yesterday's entry - not blocked
+
+        if cooldown == 0 or not sl_time_str:
+            return True   # All-day block (cooldown=0 or old format with no timestamp)
+
+        elapsed_min = (datetime.now() - datetime.fromisoformat(sl_time_str)).total_seconds() / 60
+        blocked = elapsed_min < cooldown
+        if not blocked:
+            logging.info(f"[REENTRY-OK] {tradingsymbol} cooldown expired ({elapsed_min:.0f}/{cooldown} min)")
+        return blocked
 
     # ========================================
     # PRO FEATURES: State Reconciliation & Forced Exit

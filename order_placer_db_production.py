@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 import sys
 import io
-from datetime import datetime, timezone, timedelta, time as dtime
+from datetime import datetime, date, timezone, timedelta, time as dtime
 from kiteconnect import KiteConnect
 from db_utils import transaction, TransactionError, get_db_connection
 # Fix Windows encoding
@@ -21,7 +21,7 @@ from pathlib import Path
 master_lib = r"C:\Users\meetm\OneDrive\Desktop\GCPPythonCode\MasterConfiguration\lib"
 if master_lib not in sys.path:
     sys.path.append(master_lib)
-from master_resource import MasterResource, get_sl_exits_path, get_trading_db_path
+from master_resource import MasterResource, get_sl_exits_path, get_sl_config_path, get_trading_db_path
 
 # Configure logging with centralized Master Hub directory
 log_ts = datetime.now().strftime('%d%b%Y_%H_%M_%S').upper()
@@ -94,6 +94,10 @@ class OrderPlacerProduction:
         # Add order tracking columns if they don't exist
         self._add_order_tracking_columns()
 
+        # Load SL config (for reentry_cooldown_minutes)
+        self.sl_config = {}
+        self._load_sl_config()
+
         # Load SL exits blacklist
         self.sl_exits_today = {}
         self._load_sl_exits()
@@ -133,6 +137,19 @@ class OrderPlacerProduction:
         except sqlite3.OperationalError as e:
             logging.debug(f"[DB] Column check: {e}")
 
+    def _load_sl_config(self):
+        """Load reentry_cooldown_minutes from sl_config.json"""
+        try:
+            import os
+            sl_config_path = get_sl_config_path()
+            if os.path.exists(sl_config_path):
+                with open(sl_config_path, 'r') as f:
+                    self.sl_config = json.load(f)
+        except Exception as e:
+            logging.warning(f"[INIT] Could not load sl_config: {e}")
+        finally:
+            self.sl_config.setdefault('reentry_cooldown_minutes', 30)
+
     def _load_sl_exits(self):
         """Load SL exits blacklist from file"""
         try:
@@ -144,10 +161,10 @@ class OrderPlacerProduction:
                     data = json.load(f)
                     today = date.today().isoformat()
 
-                    # Only keep today's exits
+                    # Only keep today's exits; handle old str format and new dict format
                     self.sl_exits_today = {
                         k: v for k, v in data.items()
-                        if v == today
+                        if (v == today if isinstance(v, str) else v.get('date') == today)
                     }
 
                     if self.sl_exits_today:
@@ -165,14 +182,39 @@ class OrderPlacerProduction:
                 with open(sl_exits_path, 'r') as f:
                     data = json.load(f)
                     today = date.today().isoformat()
-                    self.sl_exits_today = {k: v for k, v in data.items() if v == today}
+                    self.sl_exits_today = {
+                        k: v for k, v in data.items()
+                        if (v == today if isinstance(v, str) else v.get('date') == today)
+                    }
         except Exception:
             pass
     
     def is_blocked_from_reentry(self, tradingsymbol):
-        """Check if instrument is blocked from re-entry due to SL exit"""
-        from datetime import date
-        return tradingsymbol in self.sl_exits_today and self.sl_exits_today[tradingsymbol] == date.today().isoformat()
+        """Check if instrument is still within the re-entry cooldown window after an SL hit."""
+        if tradingsymbol not in self.sl_exits_today:
+            return False
+
+        entry = self.sl_exits_today[tradingsymbol]
+        today = date.today().isoformat()
+        cooldown = self.sl_config.get('reentry_cooldown_minutes', 30)
+
+        # Parse both old format (plain date string) and new format (dict with sl_time)
+        if isinstance(entry, str):
+            date_iso, sl_time_str = entry, None
+        else:
+            date_iso, sl_time_str = entry.get('date'), entry.get('sl_time')
+
+        if date_iso != today:
+            return False  # Yesterday's entry - not blocked
+
+        if cooldown == 0 or not sl_time_str:
+            return True   # All-day block (cooldown=0 or old format with no timestamp)
+
+        elapsed_min = (datetime.now() - datetime.fromisoformat(sl_time_str)).total_seconds() / 60
+        blocked = elapsed_min < cooldown
+        if not blocked:
+            logging.info(f"[REENTRY-OK] {tradingsymbol} cooldown expired ({elapsed_min:.0f}/{cooldown} min)")
+        return blocked
     
     def _reconnect_kite(self):
         """Re-initialise the Kite session from Master Hub"""
