@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 import sys
 import io
-from datetime import datetime
+from datetime import datetime, timezone, timedelta, time as dtime
 from kiteconnect import KiteConnect
 from db_utils import transaction, TransactionError, get_db_connection
 # Fix Windows encoding
@@ -21,7 +21,7 @@ from pathlib import Path
 master_lib = r"C:\Users\meetm\OneDrive\Desktop\GCPPythonCode\MasterConfiguration\lib"
 if master_lib not in sys.path:
     sys.path.append(master_lib)
-from master_resource import MasterResource, get_sl_exits_path
+from master_resource import MasterResource, get_sl_exits_path, get_trading_db_path
 
 # Configure logging with centralized Master Hub directory
 log_ts = datetime.now().strftime('%d%b%Y_%H_%M_%S').upper()
@@ -373,6 +373,25 @@ class OrderPlacerProduction:
         
         return True
     
+    def get_order_variety(self, exchange):
+        """Return VARIETY_REGULAR if the exchange is currently open, else VARIETY_AMO.
+
+        Market hours (IST, Mon-Fri):
+          NSE / NFO / BFO : 09:15 – 15:30
+          MCX             : 09:00 – 23:55
+        """
+        IST = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(IST).time()
+
+        if exchange == 'MCX':
+            is_open = dtime(9, 0) <= now <= dtime(23, 55)
+        else:  # NSE, NFO, BFO
+            is_open = dtime(9, 15) <= now <= dtime(15, 30)
+
+        variety = self.kite.VARIETY_REGULAR if is_open else self.kite.VARIETY_AMO
+        logging.info(f"[VARIETY] Exchange: {exchange} | Market open: {is_open} | Variety: {'REGULAR' if is_open else 'AMO'}")
+        return variety
+
     def generate_order_tag(self, channel_name):
         """
         Generate order tag from channel name (max 20 chars for Kite API)
@@ -383,30 +402,30 @@ class OrderPlacerProduction:
         def truncate_tag(channel_name, max_length=20):
             """Truncate channel name to fit Kite API tag limits"""
             prefix = "BOT:"
-            available = max_length - len(prefix)
-            
-            if len(channel_name) <= available:
-                return prefix + channel_name
-            
-            # Smart truncation - keep important words
-            words = channel_name.split()
+            available = max_length - len(prefix)  # 16 chars
+
+            # Sanitize FIRST: strip emojis and non-ASCII chars before any length check.
+            # Emojis are multi-byte in UTF-8; Kite API rejects tags where byte-length > 20
+            # even if Python len() (codepoints) appears within limit.
+            sanitized = ''.join(
+                c for c in channel_name if c.isascii() and (c.isalnum() or c in ' _-')
+            )
+
+            if len(sanitized) <= available:
+                return prefix + sanitized
+
+            # Smart truncation - concatenate words (no spaces) to maximise info
+            words = sanitized.split()
             truncated = ""
-            
             for word in words:
-                # Remove emojis and special characters
-                clean_word = ''.join(c for c in word if c.isalnum() or c in ' _-')
-                if not clean_word:
-                    continue
-                    
-                if len(truncated + clean_word) <= available:
-                    truncated += clean_word
+                if len(truncated + word) <= available:
+                    truncated += word
                 else:
-                    # Add partial word if space allows
                     remaining = available - len(truncated)
                     if remaining > 3:
-                        truncated += clean_word[:remaining]
+                        truncated += word[:remaining]
                     break
-            
+
             return prefix + truncated
         
         # Generate the tag
@@ -496,7 +515,7 @@ class OrderPlacerProduction:
                         order_tag = self.generate_order_tag(channel_name)
                         
                         order_id = self.kite.place_order(
-                            variety=self.kite.VARIETY_REGULAR,
+                            variety=self.get_order_variety(exchange),
                             exchange=exchange,
                             tradingsymbol=tradingsymbol,
                             transaction_type=self.kite.TRANSACTION_TYPE_BUY if action.upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
@@ -513,7 +532,7 @@ class OrderPlacerProduction:
                         order_tag = self.generate_order_tag(channel_name)
                         
                         order_id = self.kite.place_order(
-                            variety=self.kite.VARIETY_REGULAR,
+                            variety=self.get_order_variety(exchange),
                             exchange=exchange,
                             tradingsymbol=tradingsymbol,
                             transaction_type=self.kite.TRANSACTION_TYPE_BUY if action.upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
@@ -752,7 +771,7 @@ class OrderPlacerProduction:
                                 order_tag = self.generate_order_tag(sig['channel_name'])
                                 
                                 order_id = self.kite.place_order(
-                                    variety=self.kite.VARIETY_REGULAR,
+                                    variety=self.get_order_variety(exchange),
                                     exchange=exchange,
                                     tradingsymbol=trading_symbol,
                                     transaction_type=self.kite.TRANSACTION_TYPE_BUY if data['action'].upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
@@ -785,7 +804,7 @@ class OrderPlacerProduction:
                                     limit_price = round(limit_price, 2)
                                     
                                     order_id = self.kite.place_order(
-                                        variety=self.kite.VARIETY_REGULAR,
+                                        variety=self.get_order_variety(exchange),
                                         exchange=exchange,
                                         tradingsymbol=trading_symbol,
                                         transaction_type=self.kite.TRANSACTION_TYPE_BUY if data['action'].upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
@@ -800,7 +819,7 @@ class OrderPlacerProduction:
                                 else:
                                     # Index options: Use MARKET order as usual
                                     order_id = self.kite.place_order(
-                                        variety=self.kite.VARIETY_REGULAR,
+                                        variety=self.get_order_variety(exchange),
                                         exchange=exchange,
                                         tradingsymbol=trading_symbol,
                                         transaction_type=self.kite.TRANSACTION_TYPE_BUY if data['action'].upper() == 'BUY' else self.kite.TRANSACTION_TYPE_SELL,
